@@ -6,6 +6,7 @@ export const packageUrl = (name) => `https://greenflagged.dev/packages/npm/${nam
 export const MAX_ENTRIES = 500; // audit_manifest's own cap
 export const AUDIT_TTL_MS = 5 * 60 * 1000;
 const MAX_CACHED_AUDITS = 20;
+export const SIGN_IN_COMMAND = ["npm", "login", "--registry=https://greenflagged.dev/npm/"];
 const MAX_PARENTS = 12;
 
 // A row's level, worst first. `pending` and `not_imported` are not bad news about
@@ -189,6 +190,18 @@ export function storeAudit(cache, key, list, now) {
   cache.delete(key); // re-adding keeps the oldest first in the Map
   cache.set(key, { list, at: now });
   if (cache.size > MAX_CACHED_AUDITS) cache.delete(cache.keys().next().value);
+}
+
+// The layout block showing `mod`, or null when it isn't docked: a mod pane or an
+// overlay has no block to resize or hide.
+export function findBlock(node, mod) {
+  if (!node || typeof node !== "object") return null;
+  if (node.content?.mod === mod && node.id) return node.id;
+  for (const child of [...(node.children ?? []), ...(node.floating ?? [])]) {
+    const id = findBlock(child, mod);
+    if (id) return id;
+  }
+  return null;
 }
 
 export function summarize(list) {

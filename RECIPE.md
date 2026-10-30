@@ -39,6 +39,11 @@ Levels and labels come from the audit `status`:
 - It audits on ↻, every 15 minutes, and when a project or its dependencies change, unless that exact
   project and dependency list was audited in the last 5 minutes. Saving with the same dependencies or
   flipping back to a recent project sends no request.
+- `›` collapses the docked panel to a 40 px rail: `‹`, then the blocked, attention and ok counts stacked in
+  their colors. Below 120 px wide it draws the rail however it got there, and `‹` restores the last width.
+- `↗` detaches it into a 340×600 window: a key `greenflagged`, kept across restarts, that stays where dropped
+  and keeps Freeze and its project. The docked block hides. `↙` in the window docks it again. Dragging
+  anywhere but a control moves the window.
 - Freeze, 11 px in the header left of ↻, keeps the panel on its project: focus changes are ignored, while
   audits, watching, links and Request carry on. It reads `Frozen` in `accent` until clicked again, and then
   the panel returns to the focused terminal. It lasts as long as the panel copy.
@@ -48,16 +53,28 @@ Levels and labels come from the audit `status`:
   row a red `not on npm`. A failed call shows its error in `ansi1` under the row and can be retried.
 - Clicking any row opens `https://greenflagged.dev/packages/npm/<name>` in the browser; rows highlight with
   `hover`. Clicking Request doesn't open it.
-- With no token, it shows `npm login --registry=https://greenflagged.dev/npm/` and the tokens page, and
-  sends no request. A 401 or 403 adds "Greenflagged refused the token."
+- With no token, it sends no request and shows a sign-in screen, 14 px side padding: "Check your dependencies"
+  (14 px semibold), one line of `muted` text, a full-width 32 px **Sign in with npm** button (`accent` on
+  `accent_foreground`, centered), and "New here? Create a free account", centered. A 1 px `border` line
+  follows, then a folded "▸ Other ways to sign in" holding the `npm login` command in a `raised` code block and
+  a link to the tokens page. A 401 or 403 adds "Greenflagged refused the token." in `ansi1`.
+- The account link opens `https://greenflagged.dev/login`, which both signs in and creates accounts.
+- The button opens a tab named "Greenflagged sign in" running that command in the project's folder, and
+  the button becomes a native `.frames` spinner with "Waiting for you to sign in…". It looks for a token every 3 seconds for up to 5 minutes,
+  then audits by itself as soon as one appears.
 - ↻ forgets the token, so a new sign-in takes effect without a restart.
 
 ## Built from
 
-- `mod.json`: `{ "place": "right", "size": 320 }`. No layout, no keys.
+- `mod.json`: `{ "place": "right", "size": 320 }`. No layout, no keys. The block is found by walking `layout()`
+  for `content.mod`; without one (a mod pane), `›`, `↗` and `↙` aren't drawn.
+- Collapse is `layout.resize {id, px}`, detach is `openOverlay {kind: "window"}` plus `layout.hide {id}`, and
+  reattach is `layout.show {id}` plus `closeOverlay`. Shared state holds `greenflagged.width` and
+  `greenflagged.detached`.
 - `audit.js`: pure logic with no Herdr imports. `ECOSYSTEMS` maps a manifest filename to a parser.
 - `main.js`: the `View`. From `herdr`: `spaces`, `panes`, `focused`, `exec`, `home`, `readTextFile`,
-  `watchFolder`, `theme`. It runs `printenv`, and `xdg-open` then `open` for links.
+  `watchFolder`, `theme`. It runs `printenv`, `xdg-open` then `open` for links, and
+  `npm login` through `run("tab.new", { name, argv, folder })`.
 - The audit is one JSON-RPC `tools/call` of `audit_manifest` by `POST https://greenflagged.dev/mcp` with
   `Authorization: Bearer <token>`. The endpoint is stateless, so there is no `initialize`. The answer
   arrives as JSON or as one SSE event, and the result is JSON text in `result.content[0].text`, keyed by
@@ -80,6 +97,15 @@ Levels and labels come from the audit `status`:
 - `older version only` must recommend an exact pin, never `proposed_constraint`: `^1.5.1` allows the newer
   versions that weren't approved, and on public npm those can be the compromised ones.
 - The Request button must call `cx.stop_propagation()`, or its click reaches the row and opens the browser.
+- Poll for a sign-in only after the button is clicked, and never overlap polls. `watchFolder` can't see a
+  remote machine, and `~/.npmrc` may be on one.
+- Leave `folder` out of `tab.new` while frozen: the current space may be on another machine.
+- Read `overlay` and the window's own props from `props()`. `init`'s first argument doesn't carry them, and
+  without `overlay` the window takes itself for the docked copy.
+- Every control in a detached window needs `.on_mouse_down("left", ...)` calling `cx.stop_propagation()`, or
+  pressing it drags the window.
+- A hidden block's copy stays alive with its timers running. Skip its audits while detached, or each project
+  is polled twice. ↻ must still work there, so a stuck flag can be recovered.
 - Guard a request twice: an in-flight set for double clicks, and shared state after it finishes. Only apply
   remembered outcomes to rows still `not_imported`, so the audit wins once the package is imported.
 - `home()` is the window's machine. On a remote machine, ask for `HOME` there.
@@ -101,8 +127,12 @@ Levels and labels come from the audit `status`:
 - Focusing a terminal in another project switches the panel, and clicking the panel doesn't.
 - Adding a dependency to `package.json` adds a row after saving.
 - Flipping between two projects inside 5 minutes sends one audit for each, not one per switch.
+- `›` gives a rail with the right counts, and `‹` restores the width, including after a restart.
+- `↗` opens a window that survives a restart, on the same project if frozen, and `↙` brings the panel back.
 - With Freeze on, focusing another project changes nothing, and turning it off switches to that project.
 - Requesting a `not imported` package leaves it `requested` after a restart, with no Request button.
 - Clicking a row opens its package page, and clicking Request doesn't.
-- With no token, the panel shows the setup text and sends no request.
+- The sign-up link opens the login page.
+- With no token, the panel shows Sign in with npm and sends no request. Finishing the login in the tab it
+  opens fills the panel in without clicking ↻.
 - A folder with no `package.json` shows "No package.json in this folder or above it."

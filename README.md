@@ -31,7 +31,11 @@ cp -R herdr-greenflagged/mods/greenflagged ~/.config/herdr-app/mods/
 
 ## Sign in
 
-The panel needs a Greenflagged token. The quickest way is to sign in with npm, then click ↻:
+New to Greenflagged? Create a free account at <https://greenflagged.dev/login>, or use the link in
+the panel. `npm login` opens the same page, so you can also sign up as part of signing in.
+
+The panel needs a Greenflagged token. The quickest way is the **Sign in with npm** button, which opens a
+tab running `npm login` and picks up the token when you finish. Or run it yourself, then click ↻:
 
 ```sh
 npm login --registry=https://greenflagged.dev/npm/
@@ -58,13 +62,17 @@ Herdr first, then on that one, so you only need to sign in on one of them.
   to import and review that package, under your token. Nothing is requested unless you click.
 - **Files:** it reads `package.json` from your terminal's folder and the folders above it, and
   `~/.npmrc`. It writes nothing to your project. Requests are remembered in Herdr's `shared.json`.
-- **Programs:** it runs `printenv` to read your token, and `xdg-open` or `open` when you click a row.
+- **Programs:** it runs `printenv` to read your token, `xdg-open` or `open` when you click a row, and
+  `npm login` when you click Sign in.
 
 ## When it checks
 
 It checks when you focus a different project, when the dependencies in `package.json` change, and
 every 15 minutes while it's open. Going back to a project within 5 minutes reuses its last result, and ↻
 always checks again.
+
+Click **›** to collapse the panel to a narrow rail showing its counts, and **‹** to expand it. Click **↗**
+to detach it into a floating window you can drag anywhere, and **↙** to dock it again.
 
 Click **Freeze** to keep the panel on the current project while you work in another tab. It keeps
 updating for that project. Click **Frozen** to follow the focused terminal again. Transitive dependencies aren't checked. Dependencies that come

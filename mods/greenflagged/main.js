@@ -1,13 +1,26 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, exec, home, readTextFile, shared, setShared, watchFolder, theme } from "herdr";
 import {
-  ECOSYSTEMS, MCP_URL, MAX_ENTRIES, auditRequest, cachedAudit, packageUrl, parentFolders, parseToolResponse, rememberRequest, requestCall, rows,
+  closeOverlay, exec, focused, home, layout, openOverlay, panes, props, readTextFile, run, setShared, shared, spaces, theme, watchFolder,
+} from "herdr";
+import {
+  ECOSYSTEMS, MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, auditRequest, cachedAudit, findBlock, packageUrl, parentFolders, parseToolResponse, rememberRequest, requestCall, rows,
   storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
 
 const RECHECK_MS = 15 * 60 * 1000; // reviews finish on the registry's time, not ours
 const TOKEN_URL = "greenflagged.dev/account/tokens";
+const SIGN_UP_URL = "https://greenflagged.dev/login"; // the same page signs in and creates accounts
+const SIGN_IN_POLL_MS = 3000;
+const SIGN_IN_WAIT_MS = 5 * 60 * 1000;
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const MOD = "greenflagged";
+const WIDE = 320;
+const RAIL = 40;
+const RAIL_BELOW = 120; // by width, so dragging the panel narrow gives the rail too
+const DETACHED = "greenflagged.detached";
+const WIDTH = "greenflagged.width";
+const stopPress = (_e, cx) => cx.stop_propagation(); // a press that isn't stopped drags a detached window
 const REQUESTED = "greenflagged.requested"; // in shared state, so it outlives a restart
 
 // The terminal in focus, or null when focus is on something with no folder, such
@@ -70,14 +83,49 @@ async function findManifest({ cwd, on }, stop) {
 
 export default class Greenflagged extends View {
   init(_props, cx) {
+    const given = props() ?? {}; // `overlay` is only on props(), not on init's argument
+    this.overlay = given.overlay ?? null; // set only on the detached window
     this.state = "idle"; // idle | none | loading | ready | no-token | error
     this.showOk = false;
     this.requesting = new Set(); // in flight, so a second click can't send a second request
     this.requestErrors = new Map();
     this.audits = new Map();
-    this.frozen = false;
+    this.frozen = Boolean(given.frozen);
+    this.here = given.here;
     this.refresh(cx);
-    cx.timer.every(RECHECK_MS, (cx) => this.refresh(cx, { force: true }));
+    // The docked copy lives on while hidden, and shouldn't audit alongside the window.
+    cx.timer.every(RECHECK_MS, (cx) => { if (!this.isStandingBy()) this.refresh(cx, { force: true }); });
+    cx.timer.every(SIGN_IN_POLL_MS, (cx) => this.pollSignIn(cx));
+  }
+
+  isStandingBy() {
+    return !this.overlay && Boolean(shared(DETACHED));
+  }
+
+  collapse(block, cx) {
+    setShared(WIDTH, this.width ?? WIDE);
+    run("layout.resize", { id: block, px: RAIL });
+    cx.notify();
+  }
+
+  expand(block) {
+    run("layout.resize", { id: block, px: shared(WIDTH) ?? WIDE });
+  }
+
+  detach(block) {
+    setShared(DETACHED, true);
+    openOverlay({
+      kind: "window", mod: MOD, key: MOD, keep: true, width: WIDE + 20, height: 600,
+      props: { frozen: this.frozen, here: this.here },
+    });
+    run("layout.hide", { id: block });
+  }
+
+  reattach(block) {
+    setShared(DETACHED, null);
+    run("layout.show", { id: block });
+    run("layout.resize", { id: block, px: shared(WIDTH) ?? WIDE });
+    closeOverlay(this.overlay);
   }
 
   // Each folder change restarts this; `watched` is what ends the old loop.
@@ -143,6 +191,37 @@ export default class Greenflagged extends View {
     });
   }
 
+  // Opened in the project's folder so that focusing the new tab keeps this project.
+  // While frozen the current space may be elsewhere, so the folder is left out.
+  signIn(cx) {
+    run("tab.new", {
+      name: "Greenflagged sign in",
+      argv: SIGN_IN_COMMAND,
+      ...(this.frozen || !this.project ? {} : { folder: this.project.folder }),
+    });
+    this.signInUntil = Date.now() + SIGN_IN_WAIT_MS;
+    cx.notify();
+  }
+
+  // watchFolder can't see another machine, so a sign-in is polled for, briefly.
+  pollSignIn(cx) {
+    if (!this.signInUntil || this.polling) return;
+    if (this.state !== "no-token" || Date.now() >= this.signInUntil) {
+      this.signInUntil = null;
+      cx.notify();
+      return;
+    }
+    this.polling = true;
+    cx.spawn(async (cx) => {
+      const token = await readToken(this.here?.on).catch(() => null);
+      this.polling = false;
+      if (!token) return;
+      this.token = token;
+      this.signInUntil = null;
+      this.refresh(cx, { force: true });
+    });
+  }
+
   request(item, cx) {
     if (!item.requestable || this.requesting.has(item.name)) return;
     this.requesting.add(item.name);
@@ -171,7 +250,8 @@ export default class Greenflagged extends View {
     if (busy) return div().text_color(t.dim).text_size(11).child("Requesting…");
     if (!item.requestable || this.hovered !== item.name) return div().text_color(color).text_size(11).child(item.label);
     return div().id(`request-${item.name}`).px(6).rounded(4).text_size(11).bg(t.solid).text_color(t.solid_foreground)
-      .hover((s) => s.opacity(0.85)).on_click((_e, cx) => { cx.stop_propagation(); this.request(item, cx); }).child("Request");
+      .hover((s) => s.opacity(0.85)).on_mouse_down("left", stopPress)
+      .on_click((_e, cx) => { cx.stop_propagation(); this.request(item, cx); }).child("Request");
   }
 
   row(item, t) {
@@ -179,7 +259,7 @@ export default class Greenflagged extends View {
     const wanted = item.version && item.version !== item.constraint ? ` → ${item.version}` : "";
     const failure = this.requestErrors.get(item.name);
     return v_flex().id(`dep-${item.name}`).px(10).py(3).gap(1).cursor_pointer().hover((s) => s.bg(t.hover))
-      .on_click(() => { openUrl(packageUrl(item.name)); })
+      .on_mouse_down("left", stopPress).on_click(() => { openUrl(packageUrl(item.name)); })
       .when(Boolean(item.requestable), (el) => el.on_hover((on, cx) => {
         this.hovered = on ? item.name : this.hovered === item.name ? null : this.hovered;
         cx.notify();
@@ -194,16 +274,42 @@ export default class Greenflagged extends View {
       .when(Boolean(failure), (el) => el.child(div().pl(13).text_color(t.ansi1).text_size(11).child(failure)));
   }
 
+  signInScreen(t) {
+    const link = (id, text, url) => div().id(id).flex_none().cursor_pointer().text_color(t.accent)
+      .hover((s) => s.text_color(t.foreground)).on_mouse_down("left", stopPress).on_click(() => { openUrl(url); }).child(text);
+    const action = this.signInUntil
+      ? h_flex().w_full().h(32).gap(8).items_center().justify_center().text_color(t.muted)
+        .child(div().text_color(t.accent).frames(SPINNER, 90).child(SPINNER[0]))
+        .child(div().child("Waiting for you to sign in…"))
+      : h_flex().id("sign-in").w_full().h(32).items_center().justify_center().rounded(6).cursor_pointer().font_semibold()
+        .bg(t.accent).text_color(t.accent_foreground).hover((s) => s.opacity(0.85))
+        .on_mouse_down("left", stopPress).on_click((_e, cx) => this.signIn(cx)).child("Sign in with npm");
+    return v_flex().px(14).py(16).gap(12).text_size(12).text_color(t.muted)
+      .child(v_flex().gap(3)
+        .child(div().text_size(14).font_semibold().text_color(t.foreground).child("Check your dependencies"))
+        .child(div().child("Sign in to see each package's Greenflagged status.")))
+      .when(Boolean(this.message), (el) => el.child(div().text_color(t.ansi1).child(this.message)))
+      .child(action)
+      .child(h_flex().gap(4).justify_center()
+        .child(div().child("New here?"))
+        .child(link("sign-up", "Create a free account", SIGN_UP_URL)))
+      .child(div().h(1).bg(t.border))
+      .child(div().id("other-ways").flex_none().cursor_pointer().text_size(11).hover((s) => s.text_color(t.foreground))
+        .on_mouse_down("left", stopPress).on_click((_e, cx) => { this.showOther = !this.showOther; cx.notify(); })
+        .child(`${this.showOther ? "▾" : "▸"} Other ways to sign in`))
+      .when(Boolean(this.showOther), (el) => el
+        .child(v_flex().gap(4).text_size(11)
+          .child(div().child("Run this, then click ↻:"))
+          .child(div().p(8).rounded(4).bg(t.raised).text_color(t.foreground).font_family("JetBrains Mono").child(SIGN_IN_COMMAND.join(" "))))
+        .child(v_flex().gap(4).text_size(11)
+          .child(div().child("Or export GREENFLAGGED_TOKEN with a token from:"))
+          .child(link("tokens", TOKEN_URL, `https://${TOKEN_URL}`))));
+  }
+
   body(t, list) {
     const note = (text) => div().p(10).text_color(t.muted).text_size(12).child(text);
     if (this.state === "none") return note("No package.json in this folder or above it.");
-    if (this.state === "no-token") {
-      return v_flex().p(10).gap(6).text_size(12).text_color(t.muted)
-        .when(Boolean(this.message), (el) => el.child(div().text_color(t.ansi1).child(this.message)))
-        .child(div().child("Sign in from a terminal, then click ↻:"))
-        .child(div().text_color(t.foreground).child("npm login --registry=https://greenflagged.dev/npm/"))
-        .child(div().child(`Or mint a token at ${TOKEN_URL} and export it as GREENFLAGGED_TOKEN.`));
-    }
+    if (this.state === "no-token") return this.signInScreen(t);
     if (this.state === "error" && !list) return div().p(10).text_color(t.ansi1).text_size(12).child(this.message);
     if (!list) return note("Checking…");
     if (!list.length) return note("This project has no registry dependencies.");
@@ -211,20 +317,39 @@ export default class Greenflagged extends View {
     const items = flagged.map((r) => this.row(r, t));
     if (ok.length) {
       items.push(div().id("toggle-ok").px(10).py(5).text_size(12).text_color(t.muted).hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => { this.showOk = !this.showOk; cx.notify(); })
+        .on_mouse_down("left", stopPress).on_click((_e, cx) => { this.showOk = !this.showOk; cx.notify(); })
         .child(`${this.showOk ? "▾" : "▸"} ${ok.length} greenflagged`));
     }
     if (this.showOk) items.push(...ok.map((r) => this.row(r, t)));
     return v_flex().id("deps").flex_1().min_h(0).text_size(13).overflow_y_scrollbar().children(items);
   }
 
+  control(id, label, color, t, onClick) {
+    return div().id(id).flex_none().px(4).text_size(12).cursor_pointer().text_color(color)
+      .hover((s) => s.text_color(t.foreground)).on_mouse_down("left", stopPress).on_click(onClick).child(label);
+  }
+
+  rail(t, counts, block) {
+    const count = (value, color) => div().text_size(12).text_color(color).child(String(value));
+    return v_flex().id("root").on_size_change((size, cx) => { this.width = size.width; cx.notify(); })
+      .size_full().bg(t.surface).items_center().py(8).gap(8)
+      .child(this.control("expand", "‹", t.muted, t, () => this.expand(block)))
+      .when(Boolean(counts), (el) => el
+        .child(count(counts.blocked, t.ansi1))
+        .child(count(counts.attention, t.ansi3))
+        .child(count(counts.ok, t.ansi2)));
+  }
+
   render(cx) {
     const t = theme(), here = this.frozen ? null : location();
-    if (here && JSON.stringify(here) !== this.context) this.refresh(cx);
+    if (here && JSON.stringify(here) !== this.context && !this.isStandingBy()) this.refresh(cx);
+    const block = findBlock(layout(), MOD);
     const list = this.list ? withRequests(this.list, shared(REQUESTED) ?? {}) : null;
     const counts = list ? summarize(list) : null;
+    if (!this.overlay && block && this.width && this.width < RAIL_BELOW) return this.rail(t, counts, block);
     const pill = (count, color, text) => div().text_size(12).text_color(color).child(`${count} ${text}`);
-    return v_flex().size_full().bg(t.surface).child(
+    return v_flex().id("root").on_size_change((size, cx) => { this.width = size.width; cx.notify(); })
+      .size_full().bg(t.surface).child(
       v_flex().px(10).py(8).gap(3).border_b(1).border_color(t.border)
         .child(h_flex().items_center().justify_between()
           .child(div().truncate().text_size(13).font_semibold().text_color(t.foreground)
@@ -233,11 +358,14 @@ export default class Greenflagged extends View {
             .when(Boolean(this.project), (el) => el.child(
               div().id("freeze").px(4).text_size(11).cursor_pointer()
                 .text_color(this.frozen ? t.accent : t.muted).hover((s) => s.text_color(t.foreground))
-                .on_click((_e, cx) => { this.frozen = !this.frozen; cx.notify(); })
+                .on_mouse_down("left", stopPress).on_click((_e, cx) => { this.frozen = !this.frozen; cx.notify(); })
                 .child(this.frozen ? "Frozen" : "Freeze")))
-            .child(div().id("refresh").px(4).text_size(12).cursor_pointer().text_color(t.muted).hover((s) => s.text_color(t.foreground))
-              .on_click((_e, cx) => { this.token = null; this.refresh(cx, { force: true }); })
-              .child("↻"))))
+            .child(this.control("refresh", "↻", t.muted, t, (_e, cx) => { this.token = null; this.refresh(cx, { force: true }); }))
+            .when(Boolean(block), (el) => this.overlay
+              ? el.child(this.control("reattach", "↙", t.muted, t, () => this.reattach(block)))
+              : el
+                .child(this.control("detach", "↗", t.muted, t, () => this.detach(block)))
+                .child(this.control("collapse", "›", t.muted, t, (_e, cx) => this.collapse(block, cx))))))
         .when(Boolean(counts), (el) => el.child(h_flex().gap(10)
           .child(pill(counts.ok, t.ansi2, "ok"))
           .child(pill(counts.attention, t.ansi3, "attention"))

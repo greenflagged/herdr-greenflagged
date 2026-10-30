@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  AUDIT_TTL_MS, MAX_ENTRIES, auditRequest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc,
+  AUDIT_TTL_MS, MAX_ENTRIES, SIGN_IN_COMMAND, auditRequest, findBlock, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc,
 } from "../mods/greenflagged/audit.js";
 
 const toolReply = (result, extra = {}) => JSON.stringify({
@@ -213,6 +213,26 @@ test("storeAudit drops the oldest project past its limit", () => {
   storeAudit(cache, "new", [], 100);
   assert.equal(cache.has("p1"), true);
   assert.equal(cache.has("p2"), false);
+});
+
+test("the sign-in command writes the line tokenFromNpmrc reads", () => {
+  assert.deepEqual(SIGN_IN_COMMAND, ["npm", "login", "--registry=https://greenflagged.dev/npm/"]);
+  const host = new URL(SIGN_IN_COMMAND[2].split("=")[1]);
+  assert.equal(tokenFromNpmrc(`//${host.host}${host.pathname}:_authToken=gflag_abc\n`), "gflag_abc");
+});
+
+test("findBlock finds the panel in a layout tree", () => {
+  const tree = {
+    id: "root", type: "row",
+    children: [
+      { id: "side", type: "column", children: [{ id: "x", type: "block", content: { mod: "agents" } }] },
+      { id: "panel", type: "block", content: { mod: "greenflagged" } },
+    ],
+  };
+  assert.equal(findBlock(tree, "greenflagged"), "panel");
+  assert.equal(findBlock({ id: "r", floating: [{ id: "f", content: { mod: "greenflagged" } }] }, "greenflagged"), "f");
+  assert.equal(findBlock(tree, "missing"), null);
+  assert.equal(findBlock(undefined, "greenflagged"), null);
 });
 
 test("tokenFromNpmrc reads a literal or resolves a variable", () => {
