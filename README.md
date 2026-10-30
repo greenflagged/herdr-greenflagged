@@ -8,7 +8,7 @@ npm only for now. Python follows once Greenflagged's PyPI audit is live.
 
 ## Install
 
-Ask your agent to add `herdr.dev/mods/greenflagged/herdr-greenflagged`, or copy the folder yourself:
+Ask your agent to add `github.com/greenflagged/herdr-greenflagged`, or copy the folder yourself:
 
 ```sh
 git clone https://github.com/greenflagged/herdr-greenflagged
