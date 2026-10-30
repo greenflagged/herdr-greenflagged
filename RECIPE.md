@@ -1,6 +1,6 @@
 # Greenflagged
 
-Spot rejected and unreviewed npm dependencies as your agent works, and see what to use instead.
+Spot rejected and unreviewed npm dependencies as your agent works, and see what to use instead. [Greenflagged](https://greenflagged.dev) is a private npm registry that scans and reviews every package it serves. It is free for personal use.
 
 ![Greenflagged](preview.png)
 
