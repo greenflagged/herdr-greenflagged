@@ -1,12 +1,14 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, panes, focused, exec, home, readTextFile, watchFolder, theme } from "herdr";
+import { spaces, panes, focused, exec, home, readTextFile, shared, setShared, watchFolder, theme } from "herdr";
 import {
-  ECOSYSTEMS, MCP_URL, MAX_ENTRIES, auditRequest, parentFolders, parseAuditResponse, rows, summarize, tokenFromNpmrc,
+  ECOSYSTEMS, MCP_URL, MAX_ENTRIES, auditRequest, cachedAudit, packageUrl, parentFolders, parseToolResponse, rememberRequest, requestCall, rows,
+  storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
 
 const RECHECK_MS = 15 * 60 * 1000; // reviews finish on the registry's time, not ours
 const TOKEN_URL = "greenflagged.dev/account/tokens";
+const REQUESTED = "greenflagged.requested"; // in shared state, so it outlives a restart
 
 // The terminal in focus, or null when focus is on something with no folder, such
 // as this panel: clicking here must not change which project it shows.
@@ -38,6 +40,23 @@ async function readToken(on) {
   return null;
 }
 
+// The browser is on the machine running the window, so this never takes `on`.
+function openUrl(url) {
+  exec("xdg-open", [url]).catch(() => exec("open", [url]).catch(() => {}));
+}
+
+function post(token, body) {
+  return fetch(MCP_URL, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify(body),
+  });
+}
+
 async function findManifest({ cwd, on }, stop) {
   for (const folder of parentFolders(cwd, stop)) {
     for (const ecosystem of ECOSYSTEMS) {
@@ -53,6 +72,10 @@ export default class Greenflagged extends View {
   init(_props, cx) {
     this.state = "idle"; // idle | none | loading | ready | no-token | error
     this.showOk = false;
+    this.requesting = new Set(); // in flight, so a second click can't send a second request
+    this.requestErrors = new Map();
+    this.audits = new Map();
+    this.frozen = false;
     this.refresh(cx);
     cx.timer.every(RECHECK_MS, (cx) => this.refresh(cx, { force: true }));
   }
@@ -74,7 +97,7 @@ export default class Greenflagged extends View {
   }
 
   refresh(cx, { force = false } = {}) {
-    const here = location() ?? this.here;
+    const here = (this.frozen ? null : location()) ?? this.here;
     if (!here) return;
     this.here = here;
     const context = JSON.stringify(here);
@@ -90,35 +113,29 @@ export default class Greenflagged extends View {
       try {
         const project = await findManifest(here, home());
         if (run !== this.run) return;
-        if (!project) { this.project = null; this.list = null; this.signature = null; this.watched = null; return settle("none"); }
-        if (project.error) { this.project = project; this.list = null; this.signature = null; return settle("error", project.error); }
+        if (!project) { this.project = null; this.list = null; this.watched = null; return settle("none"); }
+        if (project.error) { this.project = project; this.list = null; return settle("error", project.error); }
         this.watch(project, here.on, cx);
         // Saving package.json without touching its dependencies costs no request.
-        const signature = JSON.stringify([project.path, project.deps]);
-        if (!force && signature === this.signature && this.state === "ready") return;
+        const signature = JSON.stringify([here.on, project.path, project.deps]);
+        const cached = force ? null : cachedAudit(this.audits, signature, Date.now());
+        if (cached) { this.project = project; this.list = cached; return settle("ready"); }
         const changedProject = project.path !== this.project?.path;
         this.project = project;
         if (changedProject) { this.list = null; settle("loading"); }
-        if (!project.deps.length) { this.signature = signature; this.list = []; return settle("ready"); }
+        if (!project.deps.length) { this.list = []; return settle("ready"); }
         this.token ??= await readToken(here.on);
         if (!this.token) return settle("no-token");
-        const response = await fetch(MCP_URL, {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${this.token}`,
-            "content-type": "application/json",
-            accept: "application/json, text/event-stream",
-          },
-          body: JSON.stringify(auditRequest(project.deps)),
-        });
+        const response = await post(this.token, auditRequest(project.deps));
         if (response.status === 401 || response.status === 403) {
           this.token = null;
           return settle("no-token", "Greenflagged refused the token.");
         }
         if (response.status !== 200) return settle("error", `Greenflagged answered ${response.status}.`);
-        const list = rows(project.deps, parseAuditResponse(await response.text()));
+        const list = rows(project.deps, parseToolResponse(await response.text()));
         if (run !== this.run) return;
-        this.list = list; this.signature = signature; this.checkedAt = Date.now();
+        storeAudit(this.audits, signature, list, Date.now());
+        this.list = list;
         settle("ready");
       } catch (error) {
         settle("error", String(error?.message ?? error));
@@ -126,20 +143,58 @@ export default class Greenflagged extends View {
     });
   }
 
+  request(item, cx) {
+    if (!item.requestable || this.requesting.has(item.name)) return;
+    this.requesting.add(item.name);
+    this.requestErrors.delete(item.name);
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        this.token ??= await readToken(this.here?.on);
+        if (!this.token) throw new Error("Sign in to request packages.");
+        const response = await post(this.token, requestCall(item.name, item.constraint));
+        if (response.status === 401 || response.status === 403) this.token = null;
+        if (response.status !== 200) throw new Error(`Greenflagged answered ${response.status}.`);
+        const { status } = parseToolResponse(await response.text());
+        if (rememberRequest(status)) setShared(REQUESTED, { ...(shared(REQUESTED) ?? {}), [item.name]: status });
+        else this.refresh(cx, { force: true });
+      } catch (error) {
+        this.requestErrors.set(item.name, String(error?.message ?? error));
+      }
+      this.requesting.delete(item.name);
+      cx.notify();
+    });
+  }
+
+  status(item, color, t) {
+    const busy = this.requesting.has(item.name);
+    if (busy) return div().text_color(t.dim).text_size(11).child("Requesting…");
+    if (!item.requestable || this.hovered !== item.name) return div().text_color(color).text_size(11).child(item.label);
+    return div().id(`request-${item.name}`).px(6).rounded(4).text_size(11).bg(t.solid).text_color(t.solid_foreground)
+      .hover((s) => s.opacity(0.85)).on_click((_e, cx) => { cx.stop_propagation(); this.request(item, cx); }).child("Request");
+  }
+
   row(item, t) {
     const color = { blocked: t.ansi1, attention: t.ansi3, ok: t.ansi2 }[item.level];
     const wanted = item.version && item.version !== item.constraint ? ` → ${item.version}` : "";
-    return v_flex().id(`dep-${item.name}`).px(10).py(3).gap(1)
+    const failure = this.requestErrors.get(item.name);
+    return v_flex().id(`dep-${item.name}`).px(10).py(3).gap(1).cursor_pointer().hover((s) => s.bg(t.hover))
+      .on_click(() => { openUrl(packageUrl(item.name)); })
+      .when(Boolean(item.requestable), (el) => el.on_hover((on, cx) => {
+        this.hovered = on ? item.name : this.hovered === item.name ? null : this.hovered;
+        cx.notify();
+      }))
       .child(h_flex().gap(6).items_center()
         .child(div().w(7).h(7).rounded(4).bg(color))
         .child(div().flex_1().truncate().text_color(t.foreground).child(item.name))
         .when(item.dev, (el) => el.child(div().text_color(t.dim).text_size(11).child("dev")))
-        .child(div().text_color(color).text_size(11).child(item.label)))
+        .child(this.status(item, color, t)))
       .child(div().pl(13).truncate().text_color(t.dim).text_size(11).child(`${item.constraint}${wanted}`))
-      .when(Boolean(item.detail), (el) => el.child(div().pl(13).text_color(t.muted).text_size(11).child(item.detail)));
+      .when(Boolean(item.detail), (el) => el.child(div().pl(13).text_color(t.muted).text_size(11).child(item.detail)))
+      .when(Boolean(failure), (el) => el.child(div().pl(13).text_color(t.ansi1).text_size(11).child(failure)));
   }
 
-  body(t) {
+  body(t, list) {
     const note = (text) => div().p(10).text_color(t.muted).text_size(12).child(text);
     if (this.state === "none") return note("No package.json in this folder or above it.");
     if (this.state === "no-token") {
@@ -149,10 +204,10 @@ export default class Greenflagged extends View {
         .child(div().text_color(t.foreground).child("npm login --registry=https://greenflagged.dev/npm/"))
         .child(div().child(`Or mint a token at ${TOKEN_URL} and export it as GREENFLAGGED_TOKEN.`));
     }
-    if (this.state === "error" && !this.list) return div().p(10).text_color(t.ansi1).text_size(12).child(this.message);
-    if (!this.list) return note("Checking…");
-    if (!this.list.length) return note("This project has no registry dependencies.");
-    const flagged = this.list.filter((r) => r.level !== "ok"), ok = this.list.filter((r) => r.level === "ok");
+    if (this.state === "error" && !list) return div().p(10).text_color(t.ansi1).text_size(12).child(this.message);
+    if (!list) return note("Checking…");
+    if (!list.length) return note("This project has no registry dependencies.");
+    const flagged = list.filter((r) => r.level !== "ok"), ok = list.filter((r) => r.level === "ok");
     const items = flagged.map((r) => this.row(r, t));
     if (ok.length) {
       items.push(div().id("toggle-ok").px(10).py(5).text_size(12).text_color(t.muted).hover((s) => s.bg(t.hover))
@@ -164,18 +219,25 @@ export default class Greenflagged extends View {
   }
 
   render(cx) {
-    const t = theme(), here = location();
+    const t = theme(), here = this.frozen ? null : location();
     if (here && JSON.stringify(here) !== this.context) this.refresh(cx);
-    const counts = this.list ? summarize(this.list) : null;
+    const list = this.list ? withRequests(this.list, shared(REQUESTED) ?? {}) : null;
+    const counts = list ? summarize(list) : null;
     const pill = (count, color, text) => div().text_size(12).text_color(color).child(`${count} ${text}`);
     return v_flex().size_full().bg(t.surface).child(
       v_flex().px(10).py(8).gap(3).border_b(1).border_color(t.border)
         .child(h_flex().items_center().justify_between()
           .child(div().truncate().text_size(13).font_semibold().text_color(t.foreground)
             .child(this.project?.name ?? "Dependencies"))
-          .child(div().id("refresh").px(4).text_size(12).text_color(t.dim).hover((s) => s.text_color(t.foreground))
-            .on_click((_e, cx) => { this.token = null; this.refresh(cx, { force: true }); })
-            .child("↻")))
+          .child(h_flex().flex_none().gap(6).items_center()
+            .when(Boolean(this.project), (el) => el.child(
+              div().id("freeze").px(4).text_size(11).cursor_pointer()
+                .text_color(this.frozen ? t.accent : t.muted).hover((s) => s.text_color(t.foreground))
+                .on_click((_e, cx) => { this.frozen = !this.frozen; cx.notify(); })
+                .child(this.frozen ? "Frozen" : "Freeze")))
+            .child(div().id("refresh").px(4).text_size(12).cursor_pointer().text_color(t.muted).hover((s) => s.text_color(t.foreground))
+              .on_click((_e, cx) => { this.token = null; this.refresh(cx, { force: true }); })
+              .child("↻"))))
         .when(Boolean(counts), (el) => el.child(h_flex().gap(10)
           .child(pill(counts.ok, t.ansi2, "ok"))
           .child(pill(counts.attention, t.ansi3, "attention"))
@@ -186,6 +248,6 @@ export default class Greenflagged extends View {
           div().text_size(11).text_color(t.dim).child(`${this.project.skipped.length} local or git dependencies not checked.`)))
         .when(this.state === "error" && Boolean(this.list), (el) => el.child(
           div().text_size(11).text_color(t.ansi1).child(this.message))),
-    ).child(this.body(t));
+    ).child(this.body(t, list));
   }
 }

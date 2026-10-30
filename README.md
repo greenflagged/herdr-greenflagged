@@ -54,14 +54,20 @@ Herdr first, then on that one, so you only need to sign in on one of them.
 - **Network:** it sends the name and version range of each direct dependency to
   `https://greenflagged.dev/mcp`, with your token. That includes the names of private packages.
   It sends nothing else from your project.
+- **Requests:** hovering a `not imported` package shows a Request button. Clicking it asks Greenflagged
+  to import and review that package, under your token. Nothing is requested unless you click.
 - **Files:** it reads `package.json` from your terminal's folder and the folders above it, and
-  `~/.npmrc`. It writes nothing.
-- **Programs:** it runs `printenv` to read your token.
+  `~/.npmrc`. It writes nothing to your project. Requests are remembered in Herdr's `shared.json`.
+- **Programs:** it runs `printenv` to read your token, and `xdg-open` or `open` when you click a row.
 
 ## When it checks
 
 It checks when you focus a different project, when the dependencies in `package.json` change, and
-every 15 minutes while it's open. Transitive dependencies aren't checked. Dependencies that come
+every 15 minutes while it's open. Going back to a project within 5 minutes reuses its last result, and ↻
+always checks again.
+
+Click **Freeze** to keep the panel on the current project while you work in another tab. It keeps
+updating for that project. Click **Frozen** to follow the focused terminal again. Transitive dependencies aren't checked. Dependencies that come
 from a path or a git URL aren't checked either, and the panel counts them.
 
 ## Develop

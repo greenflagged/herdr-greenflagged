@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  MAX_ENTRIES, auditRequest, parentFolders, parseAuditResponse, parsePackageJson, rows, summarize, tokenFromNpmrc,
+  AUDIT_TTL_MS, MAX_ENTRIES, auditRequest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc,
 } from "../mods/greenflagged/audit.js";
 
 const toolReply = (result, extra = {}) => JSON.stringify({
@@ -69,20 +69,20 @@ test("auditRequest stays inside the tool's cap", () => {
   assert.equal(Object.keys(manifest).length, MAX_ENTRIES);
 });
 
-test("parseAuditResponse reads plain JSON", () => {
-  assert.deepEqual(parseAuditResponse(toolReply({ a: { status: "pending" } })), { a: { status: "pending" } });
+test("parseToolResponse reads plain JSON", () => {
+  assert.deepEqual(parseToolResponse(toolReply({ a: { status: "pending" } })), { a: { status: "pending" } });
 });
 
-test("parseAuditResponse reads an SSE event", () => {
+test("parseToolResponse reads an SSE event", () => {
   const body = `event: message\ndata: ${toolReply({ a: { status: "rejected" } })}\n\n`;
-  assert.deepEqual(parseAuditResponse(body), { a: { status: "rejected" } });
+  assert.deepEqual(parseToolResponse(body), { a: { status: "rejected" } });
 });
 
-test("parseAuditResponse surfaces tool and protocol errors", () => {
+test("parseToolResponse surfaces tool and protocol errors", () => {
   const toolError = JSON.stringify({ result: { isError: true, content: [{ type: "text", text: "manifest too large" }] } });
-  assert.throws(() => parseAuditResponse(toolError), /manifest too large/);
-  assert.throws(() => parseAuditResponse(JSON.stringify({ error: { message: "bad call" } })), /bad call/);
-  assert.throws(() => parseAuditResponse(""), /empty answer/);
+  assert.throws(() => parseToolResponse(toolError), /manifest too large/);
+  assert.throws(() => parseToolResponse(JSON.stringify({ error: { message: "bad call" } })), /bad call/);
+  assert.throws(() => parseToolResponse(""), /empty answer/);
 });
 
 test("rows sort worst first and name each status", () => {
@@ -116,10 +116,103 @@ test("rows flag a constraint that misses every greenflagged version", () => {
   assert.match(row.detail, /\^4\.17\.21/);
 });
 
+test("rows pin exactly when only older versions are greenflagged", () => {
+  const [row] = rows([{ name: "docs", constraint: "1.6.2", dev: false }], {
+    docs: { status: "greenflagged", version: "1.5.1", proposed_constraint: "^1.5.1" },
+  });
+  assert.equal(row.label, "older version only");
+  assert.equal(row.detail, "Only older versions are greenflagged. Pin 1.5.1.");
+});
+
+test("rows don't call a dist-tag rejected", () => {
+  const [row] = rows([{ name: "semver", constraint: "next", dev: false }], {
+    semver: { status: "rejected", version: null, reason: { kind: "governance", detail: "unparseable constraint", scope: "version" } },
+  });
+  assert.equal(row.level, "attention");
+  assert.equal(row.label, "can't check");
+});
+
+test("rows carry the registry's recommended fix", () => {
+  const entry = (remediation) => ({ status: "rejected", reason: { detail: "rejected by review" }, remediation });
+  const [swap, bump] = rows(
+    [{ name: "request", constraint: "^2.0.0", dev: false }, { name: "tar", constraint: "^4.0.0", dev: false }],
+    {
+      request: entry([{ relation: "replaced_by", target: "@cypress/request" }]),
+      tar: entry([{ relation: "fixed_by", target: "tar", nearest_greenflagged_version: "4.4.18" }]),
+    },
+  );
+  assert.equal(swap.detail, "rejected by review Use @cypress/request instead.");
+  assert.equal(bump.detail, "rejected by review Fixed in 4.4.18.");
+});
+
 test("rows treat a package the audit omitted as not imported", () => {
   const [row] = rows([{ name: "x", constraint: "*", dev: true }], {});
   assert.equal(row.status, "not_imported");
   assert.equal(row.dev, true);
+});
+
+test("requestCall queues a pinned version and leaves a range to latest", () => {
+  assert.deepEqual(requestCall("a", "1.2.3").params.arguments, { name: "a", version: "1.2.3" });
+  assert.deepEqual(requestCall("a", "1.2.3-beta.1").params.arguments, { name: "a", version: "1.2.3-beta.1" });
+  assert.deepEqual(requestCall("a", "^1.2.3").params.arguments, { name: "a" });
+  assert.equal(requestCall("a", "*").params.name, "request_package");
+});
+
+test("only not imported rows can be requested", () => {
+  const deps = [{ name: "new", constraint: "*" }, { name: "ok", constraint: "*" }, { name: "wait", constraint: "*" }];
+  const list = withRequests(rows(deps, { ok: { status: "greenflagged", version: "1.0.0" }, wait: { status: "pending" } }), {});
+  assert.deepEqual(list.filter((r) => r.requestable).map((r) => r.name), ["new"]);
+});
+
+test("a remembered request can't be sent again", () => {
+  for (const status of ["queued", "already_queued"]) {
+    const [row] = withRequests(rows([{ name: "new", constraint: "*" }], {}), { new: status });
+    assert.equal(row.requestable, undefined);
+    assert.equal(row.label, "requested");
+  }
+});
+
+test("a request the registry refuses becomes blocked and stays that way", () => {
+  const [row] = withRequests(rows([{ name: "ghost", constraint: "1.0.0" }], {}), { ghost: "not_in_upstream" });
+  assert.equal(row.level, "blocked");
+  assert.equal(row.label, "not on npm");
+  assert.equal(row.requestable, undefined);
+});
+
+test("the audit wins once a requested package is imported", () => {
+  const [row] = withRequests(rows([{ name: "new", constraint: "*" }], { new: { status: "pending" } }), { new: "queued" });
+  assert.equal(row.label, "in review");
+});
+
+test("only outcomes that end the request are remembered", () => {
+  assert.equal(rememberRequest("queued"), true);
+  assert.equal(rememberRequest("not_in_upstream"), true);
+  assert.equal(rememberRequest("already_greenflagged"), false);
+});
+
+test("packageUrl keeps a scoped name's slash", () => {
+  assert.equal(packageUrl("lodash"), "https://greenflagged.dev/packages/npm/lodash");
+  assert.equal(packageUrl("@types/node"), "https://greenflagged.dev/packages/npm/@types/node");
+});
+
+test("cachedAudit serves a project until its audit is too old", () => {
+  const cache = new Map();
+  storeAudit(cache, "a", ["row"], 1000);
+  assert.deepEqual(cachedAudit(cache, "a", 1000 + AUDIT_TTL_MS - 1), ["row"]);
+  assert.equal(cachedAudit(cache, "a", 1000 + AUDIT_TTL_MS), null);
+  assert.equal(cache.size, 0);
+  assert.equal(cachedAudit(cache, "b", 1000), null);
+});
+
+test("storeAudit drops the oldest project past its limit", () => {
+  const cache = new Map();
+  for (let i = 0; i < 21; i++) storeAudit(cache, `p${i}`, [], i);
+  assert.equal(cache.size, 20);
+  assert.equal(cache.has("p0"), false);
+  storeAudit(cache, "p1", [], 99);
+  storeAudit(cache, "new", [], 100);
+  assert.equal(cache.has("p1"), true);
+  assert.equal(cache.has("p2"), false);
 });
 
 test("tokenFromNpmrc reads a literal or resolves a variable", () => {
