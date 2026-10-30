@@ -1,0 +1,8 @@
+{
+  "name": "herdr-greenflagged",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}
