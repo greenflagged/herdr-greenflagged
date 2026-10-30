@@ -39,8 +39,8 @@ Levels and labels come from the audit `status`:
 - It audits on ↻, every 15 minutes, and when a project or its dependencies change, unless that exact
   project and dependency list was audited in the last 5 minutes. Saving with the same dependencies or
   flipping back to a recent project sends no request.
-- `›` collapses the docked panel to a 40 px rail: `‹`, then the blocked, attention and ok counts stacked in
-  their colors. Below 120 px wide it draws the rail however it got there, and `‹` restores the last width.
+- `›` collapses the docked panel to a 40 px rail: `‹`, the blocked, attention and ok counts stacked in
+  their colors, then "Dependencies" reading top to bottom in `muted`, which also expands it. Below 120 px wide it draws the rail however it got there, and `‹` restores the last width.
 - `↗` detaches it into a 340×600 window: a key `greenflagged`, kept across restarts, that stays where dropped
   and keeps Freeze and its project. The docked block hides. `↙` in the window docks it again. Dragging
   anywhere but a control moves the window.
@@ -106,6 +106,8 @@ Levels and labels come from the audit `status`:
   pressing it drags the window.
 - A hidden block's copy stays alive with its timers running. Skip its audits while detached, or each project
   is polled twice. ↻ must still work there, so a stuck flag can be recovered.
+- GPUI can't rotate text. The rail's label is `label.svg`, "Dependencies" in Geist at 12 px as outlines
+  rotated 90° clockwise, 14 px wide. Its path names the mod folder, so a rename has to change it too.
 - Guard a request twice: an in-flight set for double clicks, and shared state after it finishes. Only apply
   remembered outcomes to rows still `not_imported`, so the audit wins once the package is imported.
 - `home()` is the window's machine. On a remote machine, ask for `HOME` there.

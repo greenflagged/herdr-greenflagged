@@ -1,4 +1,4 @@
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import {
   closeOverlay, exec, focused, home, layout, openOverlay, panes, props, readTextFile, run, setShared, shared, spaces, theme, watchFolder,
@@ -337,7 +337,10 @@ export default class Greenflagged extends View {
       .when(Boolean(counts), (el) => el
         .child(count(counts.blocked, t.ansi1))
         .child(count(counts.attention, t.ansi3))
-        .child(count(counts.ok, t.ansi2)));
+        .child(count(counts.ok, t.ansi2)))
+      .child(div().id("rail-label").flex_none().pt(4).cursor_pointer().text_color(t.muted).hover((s) => s.text_color(t.foreground))
+        .on_mouse_down("left", stopPress).on_click(() => this.expand(block))
+        .child(svg(`mods/${MOD}/label.svg`).w(14).h(83).text_color(t.muted)));
   }
 
   render(cx) {

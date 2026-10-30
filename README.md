@@ -78,6 +78,11 @@ Click **Freeze** to keep the panel on the current project while you work in anot
 updating for that project. Click **Frozen** to follow the focused terminal again. Transitive dependencies aren't checked. Dependencies that come
 from a path or a git URL aren't checked either, and the panel counts them.
 
+## Credits
+
+The rail's label in `label.svg` is drawn from outlines of [Geist](https://github.com/vercel/geist-font),
+under the SIL Open Font License 1.1.
+
 ## Develop
 
 ```sh
