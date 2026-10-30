@@ -1,6 +1,6 @@
 # Greenflagged
 
-A panel that show the dependency status in the Greenflagged registry for the focused project. Greenflagged is a private registry (free for personal use) that reviews every package before serving it, helping keep your supply chain safe.
+Spot rejected and unreviewed npm dependencies as your agent works, and see what to use instead. [Greenflagged](https://greenflagged.dev) is a private npm registry that scans and reviews every package it serves. It is free for personal use.
 
 ![Greenflagged](preview.png)
 
