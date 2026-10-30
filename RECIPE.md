@@ -1,8 +1,6 @@
 # Greenflagged
 
-A panel on the right of the window that shows how the project in the focused terminal stands against
-the Greenflagged registry: a count of ok, attention and blocked dependencies, then the problems, worst
-first, with the greenflagged packages folded behind a count.
+A panel that show the dependency status in the Greenflagged registry for the focused project. Greenflagged is a private registry (free for personal use) that reviews every package before serving it, helping keep your supply chain safe.
 
 ![Greenflagged](preview.png)
 
