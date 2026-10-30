@@ -2,7 +2,7 @@
 
 Spot rejected and unreviewed npm dependencies as your agent works, and see what to use instead. [Greenflagged](https://greenflagged.dev) is a private npm registry that scans and reviews every package it serves. It is free for personal use.
 
-![Greenflagged](preview.png)
+![Greenflagged panel for link-shortener: 7 ok, 3 attention and 1 blocked; request is rejected, with @cypress/request suggested instead](preview.png)
 
 ## What you see
 
