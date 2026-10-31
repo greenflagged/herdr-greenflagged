@@ -6,6 +6,20 @@ The problems come first, and the greenflagged packages fold away behind a count.
 
 npm only for now. Python follows once Greenflagged's PyPI audit is live.
 
+## What it looks like
+
+The panel opens on a project with one blocked dependency and suggests a replacement for it:
+
+![link-shortener project with 7 ok, 3 attention and 1 blocked; request is rejected, with @cypress/request suggested instead](docs/1-before.webp)
+
+Swapping `request` for `@cypress/request` clears the block, and the panel updates by itself:
+
+![Diff replacing request with @cypress/request; the panel updates to 8 ok, 3 attention, 0 blocked](docs/2-swap-request.webp)
+
+Moving the other three to the suggested versions greenflags every dependency:
+
+![Diff updating chalk, colors and debug to the suggested versions; the panel shows all 11 dependencies greenflagged](docs/3-all-green.webp)
+
 ## Install
 
 Ask your agent to add `github.com/greenflagged/herdr-greenflagged`, or copy the folder yourself:
