@@ -10,13 +10,16 @@
 // worst case; it does not keep a parse inside that budget. If the 1000× figure
 // holds, input well under the cap could already take longer than a second there.
 //
-// The subset is TOML 1.0.0 plus three 1.1.0 additions that lockfile writers may
-// emit: inline tables spanning lines (with comments and a trailing comma), and
-// the \e and \xHH escapes. Floats, date-times, inf/nan and integers beyond
-// 2^53 come back as their raw text; the float and date-time text is checked
-// only loosely. Keys and tables follow TOML's rules: a duplicate key, a table
-// defined twice, or a header or dotted key reaching into an inline table or a
-// static array is an error, as TOML requires.
+// The subset is TOML 1.0.0 plus four 1.1.0 additions that lockfile writers may
+// emit: inline tables spanning lines (with comments and a trailing comma), the
+// \e and \xHH escapes, and times that leave out their seconds.
+// Floats, date-times, inf/nan and integers beyond 2^53 come back as their raw
+// text. A bare value that is not a boolean or an integer must have a float's,
+// inf/nan's or date-time's shape, or it is an error (12abc, 1-2, 1.); only the
+// shape is checked, not ranges, so 1979-13-45 comes back as text. A duplicate
+// key, a table defined twice (including an implicit table that a dotted key has
+// since extended), or a header or dotted key reaching into an inline table or a
+// static array is an error.
 
 export const MAX_TOML_LENGTH = 1 << 20; // characters; about six 5,000-line Cargo.locks
 const MAX_DEPTH = 64; // nested arrays and inline tables, so deep input can't overflow the stack
@@ -25,7 +28,8 @@ const TAB = 9, LF = 10, CR = 13, SPACE = 32, QUOTE = 34, HASH = 35, APOS = 39, P
   DASH = 45, DOT = 46, ZERO = 48, NINE = 57, EQUALS = 61, UPPER_A = 65, UPPER_F = 70, UPPER_U = 85,
   UPPER_Z = 90, LBRACKET = 91, BACKSLASH = 92, RBRACKET = 93, UNDERSCORE = 95, LOWER_A = 97,
   LOWER_B = 98, LOWER_E = 101, LOWER_F = 102, LOWER_N = 110, LOWER_O = 111, LOWER_R = 114,
-  LOWER_T = 116, LOWER_U = 117, LOWER_X = 120, LOWER_Z = 122, LBRACE = 123, RBRACE = 125;
+  LOWER_T = 116, LOWER_U = 117, LOWER_X = 120, LOWER_Z = 122, LBRACE = 123, RBRACE = 125, COLON = 58,
+  UPPER_T = 84;
 
 // Parses `text` into { value } or reports { error: "line N: …", line: N }. Never throws.
 // Tables are null-prototype objects, so a key like `__proto__` is just a key.
@@ -59,12 +63,87 @@ const lineAt = (text, pos) => {
 };
 
 const table = () => Object.create(null);
-// A float or date-time starts with a digit, or a sign and a digit; inf and nan may also take a sign.
-function looksNumeric(raw) {
-  const c = raw.charCodeAt(0), signed = c === PLUS || c === DASH;
-  if (isDigit(signed ? raw.charCodeAt(1) : c)) return true;
-  const rest = signed ? raw.slice(1) : raw;
-  return rest === "inf" || rest === "nan";
+// Whether raw has the shape of a TOML float, inf/nan, or date-time. One left-to-right scan, no
+// regex. It checks characters and their order (digits, separators, underscores between digits),
+// not ranges: 1979-13-45 has a date's shape and passes.
+function isFloatOrDateTime(raw) {
+  const c = raw.charCodeAt(0);
+  if (c === PLUS || c === DASH) return isFloatBody(raw, 1);
+  return isFloatBody(raw, 0) || isDateTime(raw);
+}
+
+// [+-]inf, [+-]nan, or int-part then .digits and/or e[+-]digits, from index i.
+function isFloatBody(raw, i) {
+  const rest = i === 0 ? raw : raw.slice(i);
+  if (rest === "inf" || rest === "nan") return true;
+  if (raw.charCodeAt(i) === ZERO) i++; // a zero int part, which must stand alone
+  else if (isDigit(raw.charCodeAt(i))) i = digitRun(raw, i);
+  else return false;
+  let fracOrExp = false;
+  if (raw.charCodeAt(i) === DOT) {
+    if (!isDigit(raw.charCodeAt(i + 1))) return false;
+    i = digitRun(raw, i + 1);
+    fracOrExp = true;
+  }
+  if ((raw.charCodeAt(i) | 0x20) === LOWER_E) {
+    i++;
+    if (raw.charCodeAt(i) === PLUS || raw.charCodeAt(i) === DASH) i++;
+    if (!isDigit(raw.charCodeAt(i))) return false;
+    i = digitRun(raw, i);
+    fracOrExp = true;
+  }
+  return fracOrExp && i === raw.length;
+}
+
+// From a digit at i, past digits with single underscores between them. Returns where the run
+// stops, or -1 when an underscore is not followed by a digit (so the caller's end check fails).
+function digitRun(raw, i) {
+  for (i++; ; i++) {
+    const c = raw.charCodeAt(i);
+    if (c === UNDERSCORE) {
+      if (!isDigit(raw.charCodeAt(i + 1))) return -1;
+    } else if (!isDigit(c)) return i;
+  }
+}
+
+// n digits at i.
+function digitsAt(raw, i, n) {
+  for (let k = 0; k < n; k++) if (!isDigit(raw.charCodeAt(i + k))) return false;
+  return true;
+}
+
+// A local date (dddd-dd-dd), a local time, or a date, T/t/space, time and optional Z or ±hh:mm.
+function isDateTime(raw) {
+  if (digitsAt(raw, 0, 2) && raw.charCodeAt(2) === COLON) return timeEnd(raw, 0) === raw.length;
+  if (!(digitsAt(raw, 0, 4) && raw.charCodeAt(4) === DASH && digitsAt(raw, 5, 2) && raw.charCodeAt(7) === DASH
+    && digitsAt(raw, 8, 2))) return false;
+  if (raw.length === 10) return true;
+  const sep = raw.charCodeAt(10);
+  if (sep !== UPPER_T && sep !== LOWER_T && sep !== SPACE) return false;
+  let i = timeEnd(raw, 11);
+  if (i === -1) return false;
+  const z = raw.charCodeAt(i);
+  if (z === UPPER_Z || z === LOWER_Z) i++;
+  else if (z === PLUS || z === DASH) {
+    if (!(digitsAt(raw, i + 1, 2) && raw.charCodeAt(i + 3) === COLON && digitsAt(raw, i + 4, 2))) return false;
+    i += 6;
+  }
+  return i === raw.length;
+}
+
+// hh:mm, with :ss and .fraction optional (TOML 1.1 allows leaving out seconds), from i.
+// Returns the index after it, or -1.
+function timeEnd(raw, i) {
+  if (!(digitsAt(raw, i, 2) && raw.charCodeAt(i + 2) === COLON && digitsAt(raw, i + 3, 2))) return -1;
+  i += 5;
+  if (raw.charCodeAt(i) !== COLON) return i;
+  if (!digitsAt(raw, i + 1, 2)) return -1;
+  i += 3;
+  if (raw.charCodeAt(i) === DOT) {
+    if (!isDigit(raw.charCodeAt(i + 1))) return -1;
+    for (i++; isDigit(raw.charCodeAt(i)); i++);
+  }
+  return i;
 }
 const isTable = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isWs = (c) => c === SPACE || c === TAB;
@@ -266,7 +345,11 @@ class Parser {
     }
     if (isTable(v)) {
       if (this.inline.has(v)) this.fail(`key "${name}" is an inline table, which cannot be extended`, pos);
-      if (byDottedKey && this.headed.has(v)) this.fail(`table "${name}" is already defined by a header`, pos);
+      if (byDottedKey) {
+        if (this.headed.has(v)) this.fail(`table "${name}" is already defined by a header`, pos);
+        // A dotted key defines the implicit tables it passes through, so no header may define them later.
+        this.dotted.add(v);
+      }
       return v;
     }
     if (!byDottedKey && Array.isArray(v) && this.aot.has(v)) return v[v.length - 1];
@@ -335,7 +418,7 @@ class Parser {
     const n = integer(raw);
     if (n === BAD_INTEGER) this.fail(`invalid integer ${raw}`, start);
     if (n !== NOT_INTEGER) return n;
-    if (!looksNumeric(raw)) this.fail(`invalid value ${raw}`, start);
+    if (!isFloatOrDateTime(raw)) this.fail(`invalid value ${raw}`, start);
     return raw;
   }
 

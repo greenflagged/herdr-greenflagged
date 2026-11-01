@@ -73,8 +73,9 @@ Levels and labels come from the audit `status`:
 - `toml.js`: a small TOML reader, also pure logic, for the Python and Rust manifests and lockfiles. One linear
   pass with no regex and a 1 MiB input cap, because issue #7 reports that Herdr interrupts a synchronous step
   after about a second. The cap bounds the work but doesn't guarantee a parse fits that budget. Duplicate keys
-  and redefined tables are errors, as TOML requires. Floats and date-times come back as raw strings. Its tests
-  run the valid cases of `toml-test`, vendored in `test/fixtures/toml-test/`.
+  and redefined tables are errors. Floats and date-times come back as raw strings. A bare value that isn't
+  shaped like a boolean, integer, float or date-time is an error; date and time ranges aren't checked. Its
+  tests run the valid cases of `toml-test`, vendored in `test/fixtures/toml-test/`.
 - `main.js`: the `View`. From `herdr`: `spaces`, `panes`, `focused`, `exec`, `home`, `readTextFile`,
   `watchFolder`, `theme`. It runs `printenv`, `xdg-open` then `open` for links, and
   `npm login` through `run("tab.new", { name, argv, folder })`.

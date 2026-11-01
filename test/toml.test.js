@@ -208,6 +208,8 @@ const MALFORMED = [
   ["a table defined twice", "[dep]\na = 1\n[dep]", /table "dep" is defined more than once/],
   ["a subtable defined twice", "[a.b]\n[a]\n[a.b]", /table "a.b" is defined more than once/],
   ["a header over a dotted-key table", "[a]\nb.c = 1\n[a.b]", /table "a.b" is defined more than once/],
+  ["a header over an implicit table a dotted key extended", "[a.b.c]\n[a]\nb.d = 1\n[a.b]",
+    /table "a.b" is defined more than once/],
   ["a header over an inline table", "dep = { v = 1 }\n[dep]", /table "dep" is defined more than once/],
   ["a header into an inline table", "dep = { v = 1 }\n[dep.x]", /"dep" is an inline table/],
   ["a dotted key into an inline table", "dep = { v = 1 }\ndep.x = 2", /"dep" is an inline table/],
@@ -222,6 +224,20 @@ const MALFORMED = [
   ["an integer with a doubled underscore", "n = 1__2", /invalid integer 1__2/],
   ["a signed hex integer", "n = +0x1", /invalid integer \+0x1/],
   ["a bad hex digit", "n = 0xaafz", /invalid integer 0xaafz/],
+  // Digit-led junk: neither an integer, a float nor a date-time.
+  ["digits then letters", "n = 12abc", /invalid value 12abc/],
+  ["a digit then a symbol", "n = 0@", /invalid value 0@/],
+  ["a trailing minus", "n = 1-", /invalid value 1-/],
+  ["a minus between digits", "n = 1-2", /invalid value 1-2/],
+  ["a float with no fraction digits", "n = 1.", /invalid value 1\./],
+  ["a float with no leading digit", "n = .5", /invalid value \.5/],
+  ["a float with no exponent digits", "n = 1e", /invalid value 1e/],
+  ["a float with a leading zero", "n = 01.5", /invalid value 01\.5/],
+  ["a float with an underscore before the dot", "n = 1_.5", /invalid value 1_\.5/],
+  ["a date with nothing after the T", "d = 1979-05-27T", /invalid value 1979-05-27T/],
+  ["a signed date", "d = +1979-05-27", /invalid value \+1979-05-27/],
+  ["an offset with no colon", "d = 1979-05-27T07:32:00+0700", /invalid value 1979-05-27T07:32:00\+0700/],
+  ["inf with text after it", "n = infx", /invalid value infx/],
 ];
 
 for (const [what, bad, message] of MALFORMED) {
@@ -251,6 +267,17 @@ test("never throws on any prefix of a real lockfile", () => {
 test("never throws on input that is not a string, or on null options", () => {
   assert.deepEqual(parseToml(undefined), { error: "TOML input is not a string", line: 0 });
   assert.deepEqual(parseToml("a = 1", null).value, { __proto__: null, a: 1 });
+});
+
+test("floats, inf/nan and date-times of every valid shape come back as their text", () => {
+  const shapes = ["1.5", "-0.0", "+1e10", "6.626e-34", "5E+22", "0e0", "1_000.000_1", "inf", "+inf", "-nan",
+    "1979-05-27", "07:32:00", "07:32", "07:32:00.999", "1979-05-27T07:32:00Z", "1979-05-27t07:32z",
+    "1979-05-27T07:32", "1979-05-27T00:32:00.999999-07:00", "1979-05-27 07:32:00"];
+  for (const raw of shapes) {
+    const { value, error } = parseToml(`v = ${raw}`);
+    assert.equal(error, undefined, `${raw}: ${error}`);
+    assert.equal(value.v, raw);
+  }
 });
 
 test("dotted keys and headers may still add to tables that are not yet defined", () => {
