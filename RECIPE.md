@@ -71,9 +71,10 @@ Levels and labels come from the audit `status`:
   `greenflagged.detached`.
 - `audit.js`: pure logic with no Herdr imports. `ECOSYSTEMS` maps a manifest filename to a parser.
 - `toml.js`: a small TOML reader, also pure logic, for the Python and Rust manifests and lockfiles. One linear
-  pass with no regex and a 1 MiB input cap, because Herdr interrupts a synchronous step after about a second.
-  Floats and date-times come back as raw strings. Its tests run the valid cases of `toml-test`, vendored in
-  `test/fixtures/toml-test/`.
+  pass with no regex and a 1 MiB input cap, because issue #7 reports that Herdr interrupts a synchronous step
+  after about a second. The cap bounds the work but doesn't guarantee a parse fits that budget. Duplicate keys
+  and redefined tables are errors, as TOML requires. Floats and date-times come back as raw strings. Its tests
+  run the valid cases of `toml-test`, vendored in `test/fixtures/toml-test/`.
 - `main.js`: the `View`. From `herdr`: `spaces`, `panes`, `focused`, `exec`, `home`, `readTextFile`,
   `watchFolder`, `theme`. It runs `printenv`, `xdg-open` then `open` for links, and
   `npm login` through `run("tab.new", { name, argv, folder })`.

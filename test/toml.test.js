@@ -16,13 +16,15 @@ const sample = (name) => {
 // --- toml-test conformance (valid cases only) ---------------------------------
 //
 // test/fixtures/toml-test/ is an unmodified copy of toml-lang/toml-test v2.2.0
-// (see SOURCE.md). We run every valid case in its TOML 1.1.0 list whose expected
-// values stay inside the reader's subset: strings, integers and booleans.
+// (see SOURCE.md). We run every valid case in its TOML 1.1.0 list. Cases whose
+// expected values stay inside the reader's subset (strings, integers and
+// booleans) must match exactly.
 //
-// Skipped:
-// - whole directories, below: the reader returns these values as raw strings;
+// Checked only in part (the structure must match, but the values below need only
+// come back as strings, since the reader returns them as raw text):
+// - whole directories, below;
 // - any case whose expected JSON holds a float, date-time, local date, local
-//   time or local date-time anywhere ("mixed"), for the same reason;
+//   time or local date-time anywhere ("mixed");
 // - the named cases in SKIPPED_CASES.
 const SKIPPED_DIRS = {
   "valid/datetime/": "date-times come back as raw strings",
@@ -41,6 +43,19 @@ const leafTypes = (v, out = new Set()) => {
   else if (v !== null && typeof v === "object") for (const child of Object.values(v)) leafTypes(child, out);
   return out;
 };
+// Out-of-subset leaves of `expected`, swapped for the parsed leaf when that came back as a string
+// (or, for an integer beyond 2^53, as its exact text), so deepEqual checks everything else.
+const loosen = (expected, actual) => {
+  if (isLeaf(expected)) {
+    const raw = isLeaf(actual) && actual.type === "string";
+    if (raw && !SUBSET.has(expected.type)) return actual;
+    if (raw && expected.type === "integer" && actual.value === expected.value) return actual;
+    return expected;
+  }
+  if (Array.isArray(expected)) return expected.map((v, i) => loosen(v, actual?.[i]));
+  if (expected === null || typeof expected !== "object") return expected;
+  return Object.fromEntries(Object.entries(expected).map(([k, v]) => [k, loosen(v, actual?.[k])]));
+};
 // The parsed value in toml-test's tagged-JSON shape.
 const tag = (v) => {
   if (typeof v === "string") return { type: "string", value: v };
@@ -52,25 +67,26 @@ const tag = (v) => {
 
 const cases = read("toml-test", "files-toml-1.1.0").split("\n")
   .filter((line) => line.startsWith("valid/") && line.endsWith(".toml"));
-let ran = 0, skipped = 0;
+let exact = 0, partial = 0;
 for (const path of cases) {
   const expected = JSON.parse(read("toml-test", path.slice(0, -".toml".length) + ".json"));
   const dir = Object.keys(SKIPPED_DIRS).find((prefix) => path.startsWith(prefix));
   const outside = [...leafTypes(expected)].filter((type) => !SUBSET.has(type));
   const skip = dir ? SKIPPED_DIRS[dir]
     : SKIPPED_CASES[path] ?? (outside.length ? `mixed: contains ${outside.join(", ")}` : false);
-  if (skip) skipped++;
-  else ran++;
-  test(`toml-test ${path}`, { skip }, () => {
+  if (skip) partial++;
+  else exact++;
+  test(`toml-test ${path}${skip ? ` (in part: ${skip})` : ""}`, () => {
     const result = parseToml(read("toml-test", path));
     assert.equal(result.error, undefined, result.error);
-    assert.deepEqual(tag(result.value), expected);
+    const actual = tag(result.value);
+    assert.deepEqual(actual, skip ? loosen(expected, actual) : expected);
   });
 }
 
-test("toml-test runs most of the valid cases and accounts for every one", () => {
-  assert.equal(ran + skipped, CASE_COUNT);
-  assert.ok(ran >= 170, `only ${ran} toml-test cases ran`);
+test("toml-test lists 214 valid cases and most are checked exactly", () => {
+  assert.equal(cases.length, CASE_COUNT);
+  assert.ok(exact >= 170, `only ${exact} toml-test cases were checked exactly`);
 });
 
 // --- real-world samples, trimmed -----------------------------------------------
@@ -186,6 +202,26 @@ const MALFORMED = [
   ["a table header over a value", "dep = 1\n[dep]", /key "dep" is not a table/],
   ["a dotted key through a value", "dep = 1\ndep.version = \"1\"", /key "dep" is not a table/],
   ["an array-of-tables header over a table", "[dep]\n[[dep]]", /key "dep" is not an array of tables/],
+  ["a duplicate key", "name = \"a\"\nname = \"b\"", /duplicate key "name"/],
+  ["a duplicate key in an inline table", "dep = { v = 1, v = 2 }", /duplicate key "v"/],
+  ["a dotted key over a value", "dep.v = 1\ndep.v = 2", /duplicate key "v"/],
+  ["a table defined twice", "[dep]\na = 1\n[dep]", /table "dep" is defined more than once/],
+  ["a subtable defined twice", "[a.b]\n[a]\n[a.b]", /table "a.b" is defined more than once/],
+  ["a header over a dotted-key table", "[a]\nb.c = 1\n[a.b]", /table "a.b" is defined more than once/],
+  ["a header over an inline table", "dep = { v = 1 }\n[dep]", /table "dep" is defined more than once/],
+  ["a header into an inline table", "dep = { v = 1 }\n[dep.x]", /"dep" is an inline table/],
+  ["a dotted key into an inline table", "dep = { v = 1 }\ndep.x = 2", /"dep" is an inline table/],
+  ["a dotted key into a header table", "[a.b]\nz = 1\n[a]\nb.y = 2", /table "b" is already defined by a header/],
+  ["a table header over an array of tables", "[[dep]]\n[dep]", /key "dep" is not a table/],
+  ["an array-of-tables header over a static array", "dep = []\n[[dep]]", /key "dep" is not an array of tables/],
+  ["a header into a static array of tables", "dep = [{ v = 1 }]\n[dep.x]", /key "dep" is not a table/],
+  ["a misspelt boolean", "flag = tru", /invalid value tru/],
+  ["a bare word", "name = demo", /invalid value demo/],
+  ["text glued to a value", "n = 1[2", /unexpected text before the end of the line/],
+  ["an integer with a leading zero", "n = 007", /invalid integer 007/],
+  ["an integer with a doubled underscore", "n = 1__2", /invalid integer 1__2/],
+  ["a signed hex integer", "n = +0x1", /invalid integer \+0x1/],
+  ["a bad hex digit", "n = 0xaafz", /invalid integer 0xaafz/],
 ];
 
 for (const [what, bad, message] of MALFORMED) {
@@ -212,8 +248,21 @@ test("never throws on any prefix of a real lockfile", () => {
   }
 });
 
-test("never throws on input that is not a string", () => {
+test("never throws on input that is not a string, or on null options", () => {
   assert.deepEqual(parseToml(undefined), { error: "TOML input is not a string", line: 0 });
+  assert.deepEqual(parseToml("a = 1", null).value, { __proto__: null, a: 1 });
+});
+
+test("dotted keys and headers may still add to tables that are not yet defined", () => {
+  const { value, error } = parseToml([
+    "[fruit]", "apple.color = \"red\"", "apple.taste.sweet = true", "[fruit.apple.texture]", "smooth = true",
+    "[x.y.z]", "[x]", "w = 1", "[[p]]", "[p.q]", "r = 1", "[[p]]", "[p.q]", "r = 2",
+  ].join("\n"));
+  assert.equal(error, undefined, error);
+  assert.equal(value.fruit.apple.taste.sweet, true);
+  assert.equal(value.fruit.apple.texture.smooth, true);
+  assert.equal(value.x.w, 1);
+  assert.deepEqual(value.p.map((e) => e.q.r), [1, 2]);
 });
 
 // --- input cap and speed -----------------------------------------------------------

@@ -2,16 +2,21 @@
 // Cargo.lock. Plain data in and out, with no Herdr imports, so `npm test` can
 // run it under Node without the app.
 //
-// Herdr's JS runs about 1000× slower than V8 and interrupts a synchronous step
-// after about a second, skipping `finally`. So this is one forward pass over
-// charCodeAt with no regex and no `finally`, and input longer than
-// MAX_TOML_LENGTH is refused before the pass starts.
+// Issue #7 reports that Herdr's JS runs about 1000× slower than V8 and
+// interrupts a synchronous step after about a second, skipping `finally`; those
+// figures come from the issue, not from a measurement here. So this is one
+// forward pass over charCodeAt with no regex and no `finally`, and input longer
+// than MAX_TOML_LENGTH is refused before the pass starts. The cap bounds the
+// worst case; it does not keep a parse inside that budget. If the 1000× figure
+// holds, input well under the cap could already take longer than a second there.
 //
 // The subset is TOML 1.0.0 plus three 1.1.0 additions that lockfile writers may
 // emit: inline tables spanning lines (with comments and a trailing comma), and
 // the \e and \xHH escapes. Floats, date-times, inf/nan and integers beyond
-// 2^53 come back as their raw text. Validation is lenient: this reads
-// machine-written files, so redefined tables merge and duplicate keys overwrite.
+// 2^53 come back as their raw text; the float and date-time text is checked
+// only loosely. Keys and tables follow TOML's rules: a duplicate key, a table
+// defined twice, or a header or dotted key reaching into an inline table or a
+// static array is an error, as TOML requires.
 
 export const MAX_TOML_LENGTH = 1 << 20; // characters; about six 5,000-line Cargo.locks
 const MAX_DEPTH = 64; // nested arrays and inline tables, so deep input can't overflow the stack
@@ -24,7 +29,8 @@ const TAB = 9, LF = 10, CR = 13, SPACE = 32, QUOTE = 34, HASH = 35, APOS = 39, P
 
 // Parses `text` into { value } or reports { error: "line N: …", line: N }. Never throws.
 // Tables are null-prototype objects, so a key like `__proto__` is just a key.
-export function parseToml(text, { maxLength = MAX_TOML_LENGTH } = {}) {
+export function parseToml(text, options) {
+  const maxLength = options?.maxLength ?? MAX_TOML_LENGTH;
   if (typeof text !== "string") return { error: "TOML input is not a string", line: 0 };
   if (text.length > maxLength) return { error: `TOML input is longer than the ${maxLength}-character cap`, line: 0 };
   try {
@@ -53,6 +59,13 @@ const lineAt = (text, pos) => {
 };
 
 const table = () => Object.create(null);
+// A float or date-time starts with a digit, or a sign and a digit; inf and nan may also take a sign.
+function looksNumeric(raw) {
+  const c = raw.charCodeAt(0), signed = c === PLUS || c === DASH;
+  if (isDigit(signed ? raw.charCodeAt(1) : c)) return true;
+  const rest = signed ? raw.slice(1) : raw;
+  return rest === "inf" || rest === "nan";
+}
 const isTable = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isWs = (c) => c === SPACE || c === TAB;
 const isDigit = (c) => c >= ZERO && c <= NINE;
@@ -60,8 +73,10 @@ const isDigit = (c) => c >= ZERO && c <= NINE;
 const isBare = (c) => (c >= LOWER_A && c <= LOWER_Z) || (c >= UPPER_A && c <= UPPER_Z) || isDigit(c)
   || c === UNDERSCORE || c === DASH || c >= 0x80;
 // Where a bare value (integer, boolean, float, date-time) ends. NaN is past the end of input.
+// Brackets, braces, quotes and = also end it, so `1[2` is an error rather than the text "1[2".
 const isValueEnd = (c) => c !== c || isWs(c) || c === LF || c === CR || c === COMMA || c === RBRACKET
-  || c === RBRACE || c === HASH;
+  || c === RBRACE || c === HASH || c === LBRACKET || c === LBRACE || c === QUOTE || c === APOS
+  || c === EQUALS;
 
 const digitValue = (c) => {
   if (isDigit(c)) return c - ZERO;
@@ -70,8 +85,33 @@ const digitValue = (c) => {
   return 99;
 };
 
-// A TOML integer as a Number, or undefined when `raw` isn't one or isn't a safe integer.
+const NOT_INTEGER = Symbol("not an integer"), BAD_INTEGER = Symbol("malformed integer");
+
+// Whether raw has an integer's shape: [+-]0x, 0o or 0b (either case) followed by anything, or
+// [+-] then only digits and _. Anything else (a float, a date-time) is not this function's business.
+function looksInteger(raw) {
+  let i = raw.charCodeAt(0) === PLUS || raw.charCodeAt(0) === DASH ? 1 : 0;
+  const p = raw.charCodeAt(i + 1) | 0x20; // lower-cased
+  if (raw.charCodeAt(i) === ZERO && (p === LOWER_X || p === LOWER_O || p === LOWER_B)) return true;
+  if (i >= raw.length) return false;
+  for (; i < raw.length; i++) {
+    const c = raw.charCodeAt(i);
+    if (c !== UNDERSCORE && !isDigit(c)) return false;
+  }
+  return true;
+}
+
+// A TOML integer as a Number; the raw text when it is a valid integer beyond 2^53;
+// BAD_INTEGER when raw has an integer's shape but breaks a rule (007, 1__2, +0x1);
+// NOT_INTEGER when it is something else.
 function integer(raw) {
+  if (!looksInteger(raw)) return NOT_INTEGER;
+  const n = integerValue(raw);
+  return n === undefined ? BAD_INTEGER : n;
+}
+
+// The value of an integer-shaped raw: a Number, the raw text past 2^53, or undefined when malformed.
+function integerValue(raw) {
   let i = 0, sign = 1, radix = 10;
   const first = raw.charCodeAt(0);
   if (first === PLUS || first === DASH) {
@@ -83,11 +123,11 @@ function integer(raw) {
     if (p === LOWER_X) radix = 16;
     else if (p === LOWER_O) radix = 8;
     else if (p === LOWER_B) radix = 2;
-    else return undefined; // a leading zero: not a TOML integer
+    else return undefined; // a leading zero
     if (i === 1) return undefined; // prefixed integers take no sign
     i += 2;
   }
-  let n = 0, prevDigit = false;
+  let n = 0, prevDigit = false, big = false;
   for (; i < raw.length; i++) {
     const c = raw.charCodeAt(i);
     if (c === UNDERSCORE) {
@@ -98,10 +138,11 @@ function integer(raw) {
     const d = digitValue(c);
     if (d >= radix) return undefined;
     n = n * radix + d;
-    if (n > Number.MAX_SAFE_INTEGER) return undefined;
+    if (n > Number.MAX_SAFE_INTEGER) big = true;
     prevDigit = true;
   }
   if (!prevDigit) return undefined;
+  if (big) return raw;
   return n === 0 ? 0 : sign * n;
 }
 
@@ -110,6 +151,12 @@ class Parser {
     this.s = s;
     this.pos = s.charCodeAt(0) === 0xfeff ? 1 : 0; // a UTF-8 byte-order mark
     this.depth = 0;
+    // How each table came to exist, for TOML's no-redefinition rules. A table in none of
+    // these was created implicitly by a header ([a] in [a.b]) and may still be defined once.
+    this.headed = new WeakSet(); // defined by a [header] or as a [[header]] element
+    this.dotted = new WeakSet(); // created by a dotted key; no header may define it
+    this.inline = new WeakSet(); // an inline table: complete as written
+    this.aot = new WeakSet(); // arrays made by [[header]]; any other array is static
   }
 
   fail(message, pos = this.pos) {
@@ -166,6 +213,7 @@ class Parser {
   }
 
   // [a.b] returns that table; [[a.b]] appends a table to the array a.b and returns it.
+  // Either fails if it would redefine a table or reach into a value.
   header(root) {
     const start = this.pos;
     const many = this.code(1) === LBRACKET;
@@ -178,22 +226,50 @@ class Parser {
     }
     this.pos += many ? 2 : 1;
     let t = root;
-    const last = many ? keys.length - 1 : keys.length;
-    for (let i = 0; i < last; i++) t = this.descend(t, keys[i], start);
-    if (!many) return t;
-    const name = keys[last], existing = t[name], fresh = table();
-    if (existing === undefined) t[name] = [fresh];
-    else if (Array.isArray(existing)) existing.push(fresh);
-    else this.fail(`key "${name}" is not an array of tables`, start);
-    return fresh;
+    const last = keys.length - 1;
+    for (let i = 0; i < last; i++) t = this.descend(t, keys[i], start, false);
+    const name = keys[last], existing = t[name];
+    if (many) {
+      const fresh = table();
+      this.headed.add(fresh);
+      if (existing === undefined) {
+        const list = [fresh];
+        this.aot.add(list);
+        t[name] = list;
+      } else if (Array.isArray(existing) && this.aot.has(existing)) existing.push(fresh);
+      else this.fail(`key "${name}" is not an array of tables`, start);
+      return fresh;
+    }
+    if (existing === undefined) {
+      const fresh = (t[name] = table());
+      this.headed.add(fresh);
+      return fresh;
+    }
+    if (!isTable(existing)) this.fail(`key "${name}" is not a table`, start);
+    if (this.headed.has(existing) || this.dotted.has(existing) || this.inline.has(existing)) {
+      this.fail(`table "${keys.join(".")}" is defined more than once`, start);
+    }
+    this.headed.add(existing);
+    return existing;
   }
 
-  // The table under t[name], creating it if missing. A header after [[name]] means its last element.
-  descend(t, name, pos) {
+  // The table under t[name] on the way to a header's or dotted key's last part, creating it if
+  // missing. A header may pass through a [[name]] array (meaning its last element) and through
+  // any table except an inline one; a dotted key may pass only through tables that dotted keys or
+  // an implicit header path created.
+  descend(t, name, pos, byDottedKey) {
     const v = t[name];
-    if (v === undefined) return (t[name] = table());
-    if (isTable(v)) return v;
-    if (Array.isArray(v) && isTable(v[v.length - 1])) return v[v.length - 1];
+    if (v === undefined) {
+      const fresh = (t[name] = table());
+      if (byDottedKey) this.dotted.add(fresh);
+      return fresh;
+    }
+    if (isTable(v)) {
+      if (this.inline.has(v)) this.fail(`key "${name}" is an inline table, which cannot be extended`, pos);
+      if (byDottedKey && this.headed.has(v)) this.fail(`table "${name}" is already defined by a header`, pos);
+      return v;
+    }
+    if (!byDottedKey && Array.isArray(v) && this.aot.has(v)) return v[v.length - 1];
     return this.fail(`key "${name}" is not a table`, pos);
   }
 
@@ -227,8 +303,10 @@ class Parser {
     this.pos++;
     this.skipWs();
     const value = this.value();
-    for (let i = 0; i < keys.length - 1; i++) t = this.descend(t, keys[i], start);
-    t[keys[keys.length - 1]] = value;
+    for (let i = 0; i < keys.length - 1; i++) t = this.descend(t, keys[i], start, true);
+    const name = keys[keys.length - 1];
+    if (t[name] !== undefined) this.fail(`duplicate key "${name}"`, start);
+    t[name] = value;
   }
 
   value() {
@@ -240,7 +318,7 @@ class Parser {
     return this.bareValue();
   }
 
-  // Integers and booleans are typed; anything else bare (floats, date-times) is returned as text.
+  // Integers and booleans are typed; floats, inf/nan and date-times are returned as text.
   bareValue() {
     const s = this.s, start = this.pos;
     while (!isValueEnd(this.code())) this.pos++;
@@ -255,7 +333,10 @@ class Parser {
     if (raw === "true") return true;
     if (raw === "false") return false;
     const n = integer(raw);
-    return n === undefined ? raw : n;
+    if (n === BAD_INTEGER) this.fail(`invalid integer ${raw}`, start);
+    if (n !== NOT_INTEGER) return n;
+    if (!looksNumeric(raw)) this.fail(`invalid value ${raw}`, start);
+    return raw;
   }
 
   enter(pos) {
@@ -286,6 +367,7 @@ class Parser {
   // TOML 1.1 form: newlines, comments and a trailing comma are allowed inside the braces.
   inlineTable() {
     const open = this.pos, t = table();
+    this.inline.add(t);
     this.enter(open);
     this.pos++;
     for (;;) {
