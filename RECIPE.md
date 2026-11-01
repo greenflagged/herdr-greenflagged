@@ -33,7 +33,11 @@ Levels and labels come from the audit `status`:
 - `can't check` is `rejected` with the detail `unparseable constraint`, as a dist-tag like `next` gets.
 - A rejected row adds the first `remediation`: "Use X instead." or "Fixed in X."
 - It follows the focused terminal. Focusing a mod pane, including this panel, keeps the last project.
-- It looks for `package.json` in the terminal's folder and upward, stopping at home.
+- It looks for `package.json` in the terminal's folder and upward, stopping at home. It also looks for
+  `pyproject.toml`, `requirements.txt` (Python), `Cargo.toml` (Rust) and `go.mod` (Go), which it can't
+  audit yet. The nearest folder with any of them wins, and within one folder `package.json` wins.
+  When the winner can't be audited, the panel says "Greenflagged doesn't check <Language> dependencies
+  yet." and sends no request.
 - It audits on ↻, every 15 minutes, and when a project or its dependencies change, unless that exact
   project and dependency list was audited in the last 5 minutes. Saving with the same dependencies or
   flipping back to a recent project sends no request.
@@ -136,3 +140,5 @@ Levels and labels come from the audit `status`:
 - With no token, the panel shows Sign in with npm and sends no request. Finishing the login in the tab it
   opens fills the panel in without clicking ↻.
 - A folder with no `package.json` shows "No package.json in this folder or above it."
+- A Go repo shows "Greenflagged doesn't check Go dependencies yet." and sends no request. A repo with
+  both `package.json` and `pyproject.toml` still gets the npm audit.

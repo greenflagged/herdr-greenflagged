@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  AUDIT_TTL_MS, MAX_ENTRIES, SIGN_IN_COMMAND, auditRequest, findBlock, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc,
+  AUDIT_TTL_MS, MAX_ENTRIES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc,
 } from "../mods/greenflagged/audit.js";
 
 const toolReply = (result, extra = {}) => JSON.stringify({
@@ -14,6 +14,43 @@ test("parentFolders stops at home", () => {
 
 test("parentFolders stops at the root outside home", () => {
   assert.deepEqual(parentFolders("/srv/app", "/Users/a"), ["/srv/app", "/srv", "/"]);
+});
+
+const files = (tree) => async (path) => tree[path] ?? null;
+
+test("findManifest takes the nearest folder with a manifest", async () => {
+  const read = files({ "/Users/a/code/package.json": "{}", "/Users/a/code/svc/go.mod": "module svc" });
+  const project = await findManifest("/Users/a/code/svc/cmd", "/Users/a", read);
+  assert.equal(project.path, "/Users/a/code/svc/go.mod");
+  assert.equal(project.ecosystem.name, "Go");
+  assert.equal(project.ecosystem.audited, false);
+  assert.equal(project.deps, undefined);
+});
+
+test("findManifest prefers an audited manifest within one folder", async () => {
+  const read = files({ "/r/pyproject.toml": "", "/r/package.json": JSON.stringify({ name: "app", dependencies: { lodash: "^4.0.0" } }) });
+  const project = await findManifest("/r", "/Users/a", read);
+  assert.equal(project.path, "/r/package.json");
+  assert.equal(project.ecosystem.audited, true);
+  assert.equal(project.name, "app");
+  assert.deepEqual(project.deps, [{ name: "lodash", constraint: "^4.0.0", dev: false }]);
+});
+
+test("findManifest names each unaudited language", async () => {
+  for (const [file, name] of [["pyproject.toml", "Python"], ["requirements.txt", "Python"], ["Cargo.toml", "Rust"], ["go.mod", "Go"]]) {
+    const project = await findManifest("/r", "/Users/a", files({ [`/r/${file}`]: "" }));
+    assert.equal(project.ecosystem.name, name, file);
+  }
+});
+
+test("findManifest stops at home", async () => {
+  const read = files({ "/Users/package.json": "{}", "/package.json": "{}" });
+  assert.equal(await findManifest("/Users/a/code", "/Users/a", read), null);
+});
+
+test("findManifest counts an empty manifest as found", async () => {
+  const project = await findManifest("/r", "/Users/a", files({ "/r/requirements.txt": "" }));
+  assert.equal(project.path, "/r/requirements.txt");
 });
 
 test("parsePackageJson keeps registry deps and marks dev ones", () => {
