@@ -58,14 +58,18 @@ export function parentFolders(cwd, home) {
 
 // The nearest folder with any manifest wins. Within it, an audited manifest beats
 // an unaudited one, then list order decides. `read` answers a path's text, or null.
+// The audited files are read first and the rest only when none of them is there,
+// so a folder with a package.json costs one read.
 export async function findManifest(cwd, home, read) {
-  const ranked = [...ECOSYSTEMS.filter((e) => e.audited), ...ECOSYSTEMS.filter((e) => !e.audited)];
+  const tiers = [ECOSYSTEMS.filter((e) => e.audited), ECOSYSTEMS.filter((e) => !e.audited)];
   for (const folder of parentFolders(cwd, home)) {
-    const texts = await Promise.all(ranked.map((e) => read(`${folder}/${e.file}`)));
-    const i = texts.findIndex((text) => text !== null);
-    if (i === -1) continue;
-    const ecosystem = ranked[i], path = `${folder}/${ecosystem.file}`;
-    return ecosystem.audited ? { folder, path, ecosystem, ...ecosystem.parse(texts[i]) } : { folder, path, ecosystem };
+    for (const tier of tiers) {
+      const texts = await Promise.all(tier.map((e) => read(`${folder}/${e.file}`)));
+      const i = texts.findIndex((text) => text !== null);
+      if (i === -1) continue;
+      const ecosystem = tier[i], path = `${folder}/${ecosystem.file}`;
+      return ecosystem.audited ? { folder, path, ecosystem, ...ecosystem.parse(texts[i]) } : { folder, path, ecosystem };
+    }
   }
   return null;
 }

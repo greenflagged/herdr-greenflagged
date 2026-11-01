@@ -53,6 +53,27 @@ test("findManifest counts an empty manifest as found", async () => {
   assert.equal(project.path, "/r/requirements.txt");
 });
 
+test("findManifest surfaces a package.json that is not valid JSON", async () => {
+  const project = await findManifest("/r", "/Users/a", files({ "/r/package.json": "{ nope", "/r/go.mod": "module r" }));
+  assert.equal(project.path, "/r/package.json");
+  assert.equal(project.error, "package.json is not valid JSON");
+});
+
+test("findManifest keeps list order among unaudited manifests in one folder", async () => {
+  const all = { "/r/pyproject.toml": "", "/r/requirements.txt": "", "/r/Cargo.toml": "", "/r/go.mod": "" };
+  assert.equal((await findManifest("/r", "/Users/a", files(all))).path, "/r/pyproject.toml");
+  const { "/r/pyproject.toml": _p, ...noPyproject } = all;
+  assert.equal((await findManifest("/r", "/Users/a", files(noPyproject))).path, "/r/requirements.txt");
+  assert.equal((await findManifest("/r", "/Users/a", files({ "/r/Cargo.toml": "", "/r/go.mod": "" }))).path, "/r/Cargo.toml");
+});
+
+test("findManifest reads only package.json in a folder that has one", async () => {
+  const seen = [];
+  const read = async (path) => { seen.push(path); return path === "/r/package.json" ? "{}" : null; };
+  await findManifest("/r", "/Users/a", read);
+  assert.deepEqual(seen, ["/r/package.json"]);
+});
+
 test("parsePackageJson keeps registry deps and marks dev ones", () => {
   const { name, deps, skipped } = parsePackageJson(JSON.stringify({
     name: "app",
