@@ -4,7 +4,7 @@ import {
   closeOverlay, exec, focused, home, layout, openOverlay, panes, props, readTextFile, run, setShared, shared, spaces, theme, watchFolder,
 } from "herdr";
 import {
-  ECOSYSTEMS, MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, auditRequest, cachedAudit, findBlock, packageUrl, parentFolders, parseToolResponse, rememberRequest, requestCall, rows,
+  ECOSYSTEMS, MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, auditRequest, cachedAudit, findBlock, findManifest, packageUrl, parseToolResponse, rememberRequest, requestCall, rows,
   storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
 
@@ -70,22 +70,11 @@ function post(token, body) {
   });
 }
 
-async function findManifest({ cwd, on }, stop) {
-  for (const folder of parentFolders(cwd, stop)) {
-    for (const ecosystem of ECOSYSTEMS) {
-      const path = `${folder}/${ecosystem.file}`;
-      const text = await readTextFile(path, { on }).catch(() => null);
-      if (text !== null) return { folder, path, ecosystem, ...ecosystem.parse(text) };
-    }
-  }
-  return null;
-}
-
 export default class Greenflagged extends View {
   init(_props, cx) {
     const given = props() ?? {}; // `overlay` is only on props(), not on init's argument
     this.overlay = given.overlay ?? null; // set only on the detached window
-    this.state = "idle"; // idle | none | loading | ready | no-token | error
+    this.state = "idle"; // idle | none | unsupported | loading | ready | no-token | error
     this.showOk = false;
     this.requesting = new Set(); // in flight, so a second click can't send a second request
     this.requestErrors = new Map();
@@ -132,13 +121,13 @@ export default class Greenflagged extends View {
   watch(project, on, cx) {
     if (on) { this.watched = null; return; } // watchFolder is local only
     if (this.watched === project.folder) return;
-    const { folder, ecosystem } = project;
+    const { folder } = project;
     this.watched = folder;
     cx.spawn(async (cx) => {
       try {
         while (this.watched === folder) {
           const changed = await watchFolder(folder);
-          if (this.watched === folder && changed.some((p) => p.endsWith(`/${ecosystem.file}`))) this.refresh(cx);
+          if (this.watched === folder && changed.some((p) => ECOSYSTEMS.some((e) => p.endsWith(`/${e.file}`)))) this.refresh(cx);
         }
       } catch { if (this.watched === folder) this.watched = null; }
     });
@@ -159,11 +148,13 @@ export default class Greenflagged extends View {
         cx.notify();
       };
       try {
-        const project = await findManifest(here, home());
+        const project = await findManifest(here.cwd, home(), (path) => readTextFile(path, { on: here.on }).catch(() => null));
         if (run !== this.run) return;
         if (!project) { this.project = null; this.list = null; this.watched = null; return settle("none"); }
         if (project.error) { this.project = project; this.list = null; return settle("error", project.error); }
         this.watch(project, here.on, cx);
+        // No request for a language the registry can't check yet.
+        if (!project.ecosystem.audited) { this.project = project; this.list = null; return settle("unsupported"); }
         // Saving package.json without touching its dependencies costs no request.
         const signature = JSON.stringify([here.on, project.path, project.deps]);
         const cached = force ? null : cachedAudit(this.audits, signature, Date.now());
@@ -309,6 +300,7 @@ export default class Greenflagged extends View {
   body(t, list) {
     const note = (text) => div().p(10).text_color(t.muted).text_size(12).child(text);
     if (this.state === "none") return note("No package.json in this folder or above it.");
+    if (this.state === "unsupported") return note(`Greenflagged doesn't check ${this.project.ecosystem.name} dependencies yet.`);
     if (this.state === "no-token") return this.signInScreen(t);
     if (this.state === "error" && !list) return div().p(10).text_color(t.ansi1).text_size(12).child(this.message);
     if (!list) return note("Checking…");

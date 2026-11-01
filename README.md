@@ -4,7 +4,8 @@ A [Herdr](https://herdr.dev) panel that follows the terminal you're working in, 
 `package.json`, and shows each direct dependency's [Greenflagged](https://greenflagged.dev) status.
 The problems come first, and the greenflagged packages fold away behind a count.
 
-npm only for now. Python follows once Greenflagged's PyPI audit is live.
+npm only for now. In a Python, Rust or Go project the panel says Greenflagged doesn't check that
+language yet, and sends nothing. Python follows once Greenflagged's PyPI audit is live.
 
 ## What it looks like
 
@@ -74,7 +75,8 @@ Herdr first, then on that one, so you only need to sign in on one of them.
   It sends nothing else from your project.
 - **Requests:** hovering a `not imported` package shows a Request button. Clicking it asks Greenflagged
   to import and review that package, under your token. Nothing is requested unless you click.
-- **Files:** it reads `package.json` from your terminal's folder and the folders above it, and
+- **Files:** it reads `package.json` from your terminal's folder and the folders above it, looks for
+  `pyproject.toml`, `requirements.txt`, `Cargo.toml` and `go.mod` there too, and reads
   `~/.npmrc`. It writes nothing to your project. Requests are remembered in Herdr's `shared.json`.
 - **Programs:** it runs `printenv` to read your token, `xdg-open` or `open` when you click a row, and
   `npm login` when you click Sign in.

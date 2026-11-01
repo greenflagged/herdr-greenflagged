@@ -32,9 +32,17 @@ const LABELS = {
   greenflagged: "greenflagged",
 };
 
-// The manifest names to look for, in order. Each entry reads one file into the
-// rows shape below, so another ecosystem is another entry here.
-export const ECOSYSTEMS = [{ id: "npm", file: "package.json", parse: parsePackageJson }];
+// The manifest names to look for. An audited entry reads its file into the rows
+// shape below. An unaudited one only names the language, so the panel can say it
+// can't check it rather than that there is nothing to check. PyPI checks are still
+// off on the registry, so Python is unaudited for now.
+export const ECOSYSTEMS = [
+  { id: "npm", name: "npm", file: "package.json", audited: true, parse: parsePackageJson },
+  { id: "pypi", name: "Python", file: "pyproject.toml", audited: false },
+  { id: "pypi", name: "Python", file: "requirements.txt", audited: false },
+  { id: "cargo", name: "Rust", file: "Cargo.toml", audited: false },
+  { id: "go", name: "Go", file: "go.mod", audited: false },
+];
 
 // Folders to try from `cwd` upward, stopping after `home` when it is an ancestor.
 export function parentFolders(cwd, home) {
@@ -46,6 +54,24 @@ export function parentFolders(cwd, home) {
     dir = dir.slice(0, dir.lastIndexOf("/")) || "/";
   }
   return folders;
+}
+
+// The nearest folder with any manifest wins. Within it, an audited manifest beats
+// an unaudited one, then list order decides. `read` answers a path's text, or null.
+// The audited files are read first and the rest only when none of them is there,
+// so a folder with a package.json costs one read.
+export async function findManifest(cwd, home, read) {
+  const tiers = [ECOSYSTEMS.filter((e) => e.audited), ECOSYSTEMS.filter((e) => !e.audited)];
+  for (const folder of parentFolders(cwd, home)) {
+    for (const tier of tiers) {
+      const texts = await Promise.all(tier.map((e) => read(`${folder}/${e.file}`)));
+      const i = texts.findIndex((text) => text !== null);
+      if (i === -1) continue;
+      const ecosystem = tier[i], path = `${folder}/${ecosystem.file}`;
+      return ecosystem.audited ? { folder, path, ecosystem, ...ecosystem.parse(texts[i]) } : { folder, path, ecosystem };
+    }
+  }
+  return null;
 }
 
 // Specs that never reach a registry, so a verdict on them would mean nothing.
