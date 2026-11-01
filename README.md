@@ -103,4 +103,6 @@ under the SIL Open Font License 1.1.
 npm test
 ```
 
-`audit.js` holds the logic and imports nothing from Herdr, so the tests run under plain Node.
+`audit.js` holds the logic and imports nothing from Herdr, so the tests run under plain Node. So does
+`toml.js`, the TOML reader, whose tests use a vendored copy of the
+[toml-test](https://github.com/toml-lang/toml-test) suite in `test/fixtures/toml-test/`.
