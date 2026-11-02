@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+exclude = ["crates/old"]
+
+[workspace.package]
+version = "0.1.0"
+
+[workspace.dependencies]
+serde = "1"
+ws-core = { path = "crates/core" }
+json = { package = "serde_json", version = "1" }

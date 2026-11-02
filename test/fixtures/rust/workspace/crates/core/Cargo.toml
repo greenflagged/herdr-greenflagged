@@ -1,0 +1,9 @@
+[package]
+name = "ws-core"
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+ws-cli = { path = "../cli" }

@@ -40,7 +40,7 @@ test("findManifest prefers an audited manifest within one folder", async () => {
 
 test("WATCHED_FILES lists every manifest once", () => {
   assert.deepEqual(WATCHED_FILES, [
-    "package.json", "pyproject.toml", "uv.lock", "poetry.lock", "requirements.txt", "Cargo.toml", "go.mod", "pom.xml",
+    "package.json", "pyproject.toml", "uv.lock", "poetry.lock", "requirements.txt", "Cargo.toml", "Cargo.lock", "go.mod", "pom.xml",
     "build.gradle.kts", "gradle.lockfile", "settings.gradle.kts", "settings.gradle", "gradle/libs.versions.toml", "build.gradle",
   ]);
 });
@@ -541,4 +541,11 @@ test("README and RECIPE name every file the panel reads", () => {
     assert.ok(files.includes(`\`${name}\``), `README's Files bullet lacks ${name}`);
     assert.ok(recipe.includes(`\`${name}\``), `RECIPE.md lacks ${name}`);
   }
+});
+
+test("the Rust entry places a crate in its workspace and shapes a tree without a lock", () => {
+  const cargo = ECOSYSTEMS.find((e) => e.id === "cargo");
+  assert.equal(typeof cargo.gather, "function");
+  assert.equal(typeof cargo.unlocked, "function");
+  assert.equal(ECOSYSTEMS.filter((e) => e.gather || e.unlocked).length, 1);
 });

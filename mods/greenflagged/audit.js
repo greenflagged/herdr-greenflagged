@@ -1,6 +1,7 @@
 // Everything here is plain data in and out, with no Herdr imports, so `npm test`
 // can run it under Node without the app.
 
+import { CARGO_LOCKFILES, CARGO_NOTE, cargoProject, cargoUnlocked, parseCargoToml } from "./cargo.js";
 import { GO_LOCKFILES, GO_NOTE, parseGoMod } from "./go.js";
 import { GRADLE_COMPANIONS, GRADLE_LOCKFILES, GRADLE_MODULES, GRADLE_NOTE, parseGradleGroovy, parseGradleKts } from "./gradle.js";
 import { MAVEN_NOTE, parsePom } from "./maven.js";
@@ -74,6 +75,15 @@ const LABELS = {
 //                   `project.root`, which the panel watches. A project from an entry
 //                   without companions has `root` equal to `folder`.
 //   note         -> shown instead of the no-lockfile sentence
+//   gather(project, io) -> Promise<project>
+//                   places the project in its workspace before anything is read or watched;
+//                   never rejects. `io` is { read(path), list(dir), parents(folder) } (main.js).
+//                   main.js reads only these from the answer: `workspaceFolder` (where the
+//                   lockfiles are read and the folder watched; else `folder`), `fingerprint`
+//                   (any JSON value whose change rebuilds the tree) and `note` (one sentence
+//                   under the counts). Everything else it adds is the ecosystem's own.
+//   unlocked(project) -> resolver | null
+//                   the tree's shape from the manifests alone, when no lockfile is found
 //   modules      -> { files: [names], list(project) -> [{ name, folder }], parse(text, file, context) -> edges | null },
 //                   a multi-module build's members, opened only when the manifest is the
 //                   build root's. `list` picks dep rows and a folder relative to the root
@@ -82,7 +92,8 @@ const LABELS = {
 //                   A module with no build file, or one `parse` refuses, stays a plain row.
 // Parsers never get a file reader: every file the panel can read is a static name on an
 // entry (`file`, `lockfiles`, `companions`, `modules.files`), so the README's list of
-// files read is complete by construction. The one folder a manifest chooses is a
+// files read is complete by construction. The one exception is `gather`, which reads
+// only the entry's own `file` in other folders (Rust's workspace root and members). The one folder a manifest chooses is a
 // module's, and gradleModuleFolder (gradle.js) keeps it under the build root: plain
 // folder names only, never `..`, at most MAX_GRADLE_MODULES of them.
 // Both Python entries share one base, so their lockfiles and note can't drift apart, and
@@ -94,7 +105,8 @@ export const ECOSYSTEMS = [
   { id: "npm", name: "npm", file: "package.json", audited: true, parse: parsePackageJson },
   { ...PYTHON, file: "pyproject.toml", parse: parsePyproject },
   { ...PYTHON, file: "requirements.txt", parse: parseRequirements },
-  { id: "cargo", name: "Rust", file: "Cargo.toml", audited: false },
+  { id: "cargo", name: "Rust", file: "Cargo.toml", audited: false, parse: parseCargoToml, lockfiles: CARGO_LOCKFILES, note: CARGO_NOTE,
+    gather: cargoProject, unlocked: cargoUnlocked },
   { id: "go", name: "Go", file: "go.mod", audited: false, parse: parseGoMod, lockfiles: GO_LOCKFILES, note: GO_NOTE },
   { ...MAVEN, file: "pom.xml", parse: parsePom, note: MAVEN_NOTE },
   { ...GRADLE, file: "build.gradle.kts", parse: parseGradleKts },
