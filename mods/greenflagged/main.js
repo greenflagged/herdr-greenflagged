@@ -8,7 +8,7 @@ import {
   staleNote, storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
 import { locateCache, openCache, sessionReader } from "./cache.js";
-import { countsLine, directRoots, expandNode, failedNote, treeForProject, visibleRows } from "./tree.js";
+import { countsLine, directRoots, expandFailedNote, expandNode, treeForProject, visibleRows } from "./tree.js";
 
 const RECHECK_MS = 15 * 60 * 1000; // reviews finish on the registry's time, not ours
 const TOKEN_URL = "greenflagged.dev/account/tokens";
@@ -264,14 +264,14 @@ export default class Greenflagged extends View {
     if (node.children) return cx.notify();
     const pending = expandNode(tree, node, keys);
     cx.spawn(async (cx) => {
-      // A failure names the row's module (its file is in a cache, not the lockfile), and
-      // that note goes once a later open succeeds.
+      // A failed open names the row's module when its file is in a cache, else the
+      // lockfile (expandFailedNote). A later successful open clears that note.
       try {
         await pending;
         if (this.tree === tree && tree.note && tree.note === tree.expandNote) tree.note = tree.expandNote = null;
       } catch (error) {
         expanded.delete(path); // back to ▸, so the next click retries
-        if (this.tree === tree) tree.note = tree.expandNote = failedNote([node.name, node.version].filter(Boolean).join(" ") || tree.lockFile, error);
+        if (this.tree === tree) tree.note = tree.expandNote = expandFailedNote(tree, node, error);
       }
       if (this.tree === tree) cx.notify();
     });

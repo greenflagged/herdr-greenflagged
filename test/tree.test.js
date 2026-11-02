@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CHUNK, MAX_LOCK_CHARS, MAX_TREE_NODES, MAX_WALK_POPS, MAX_WALK_VISITS, NO_LOCKFILE_NOTE, buildTree, countsLine, expandNode, expandPaths,
-  directRoots, graphResolver, groupKey, keysOf, mergeDirect, nodeKey, pathOf, treeForProject, visibleRows,
+  directRoots, expandFailedNote, graphResolver, groupKey, keysOf, mergeDirect, nodeKey, pathOf, treeForProject, visibleRows,
 } from "../mods/greenflagged/tree.js";
 
 // A resolver over a plain graph: { name: { version, children: [edge] } }.
@@ -682,6 +682,37 @@ test("expandPaths reopens a deferred path after a rebuild", async () => {
   assert.deepEqual(visibleRows(tree, expanded).map((r) => r.node.name), ["a", "b", "c"]);
   assert.deepEqual(loads, ["a@v1", "b@v1"]);
   assert.equal(expanded.size, 2);
+});
+
+test("a deferred row that fails to reopen on a rebuild names its module, as a clearable expandNote", async () => {
+  const fail = new Set(["b"]);
+  const { resolver } = lazy({ a: { children: [] } }, { fail });
+  const lock = { file: "go.mod", text: "", resolver: () => ({ ...resolver, direct: [dep("a", false, { version: "v1" }), dep("b", false, { version: "v2" })] }) };
+  const expanded = new Set([pathOf(["a@v1"]), pathOf(["b@v2"])]);
+  const tree = await treeForProject(project([dep("a"), dep("b")]), lock, { expanded });
+  assert.equal(tree.note, "Couldn't read b v2: can't read b");
+  assert.equal(tree.expandNote, tree.note); // main.js clears a note equal to expandNote once an open succeeds
+  assert.deepEqual([...expanded], [pathOf(["a@v1"])]);
+  fail.clear();
+  const b = find(tree.roots, "b");
+  await expandNode(tree, b, [b.key]);
+  assert.deepEqual(b.children, []);
+});
+
+test("a failed reopen leaves a note the build already set", async () => {
+  const { resolver } = lazy({}, { fail: new Set(["a"]) });
+  const lock = { file: "go.mod", text: "", resolver: () => ({ ...resolver, note: "cache note", direct: [dep("a", false, { version: "v1" })] }) };
+  const tree = await treeForProject(project([dep("a")]), lock, { expanded: new Set([pathOf(["a@v1"])]) });
+  assert.equal(tree.note, "cache note");
+  assert.equal(tree.expandNote, undefined);
+});
+
+test("a non-deferred row that fails to open is blamed on the lockfile", async () => {
+  const resolve = (e) => (e.name === "bad" ? Promise.reject(new Error("line 3")) : { version: "1", children: e.name === "a" ? [{ name: "bad" }] : [] });
+  const lock = { file: "x.lock", text: "", resolver: () => ({ resolve, count: false }) };
+  const tree = await treeForProject(project([dep("a")]), lock, { expanded: new Set([pathOf(["a@1"])]) });
+  assert.equal(tree.note, "Couldn't read x.lock: line 3");
+  assert.equal(expandFailedNote(tree, find(tree.roots, "a"), new Error("line 3")), "Couldn't read x.lock: line 3");
 });
 
 test("a plain resolver's tree has no deferred node, no tag and no load", async () => {

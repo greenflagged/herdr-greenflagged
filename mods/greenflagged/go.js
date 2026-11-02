@@ -18,10 +18,11 @@
 // refresh is consistent.
 //
 // Module cache edge cases:
-// - Outside the probe (below), a `.mod` file is read only when its row opens. cache.js keeps texts up to
-//   16 Ki chars for the session, so such a `.mod` is read once; a longer one is read
-//   again each time. A first build with nothing open reads only `cache/lock`, plus the
-//   first module's `.mod` when `cache/lock` is missing (the probe fallback below).
+// - A module's `.mod` is read for each row that is open: when you open it, and when a
+//   rebuild (↻, the timer) re-opens the rows that were open (tree.js expandPaths). The
+//   only other reads are the probe (below). cache.js keeps texts up to 16 Ki chars for
+//   the session (2,000 at most, oldest out first), so those come from disk once; a
+//   missing or longer file is read again each time.
 // - Children show the version the project's go.mod selects for that path, not the one
 //   the `.mod` asks for, which stays the row's constraint. Since Go 1.17 a tidy go.mod
 //   lists every module in the build; a module it doesn't list shows the version asked

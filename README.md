@@ -91,10 +91,12 @@ Herdr first, then on that one, so you only need to sign in on one of them.
   has one. At that root it also reads `build.gradle.kts` or `build.gradle` from each module folder
   the settings file includes (up to 100), only plain folder names under the root, never `..`. For a
   Go project it also reads from Go's module cache: `GOMODCACHE`, else the first `GOPATH` folder plus
-  `/pkg/mod`, else `~/go/pkg/mod`, on the machine that holds the project. It reads only `.mod` files
-  under `cache/download/` and `cache/lock` there. On each refresh it reads `cache/lock`, to tell
-  whether there is a cache; when that file is missing it reads the first module's `.mod` instead.
-  Otherwise it reads one module's `.mod` each time you open that module's row. It reads `~/.npmrc`.
+  `/pkg/mod`, else `~/go/pkg/mod`, on the machine that holds the project. It reads only `cache/lock`
+  and `.mod` files under `cache/download/`. Each time it builds the tree it reads `cache/lock`, to
+  tell whether there is a cache; if that file is missing, it reads the first module's `.mod` instead.
+  It reads a module's `.mod` for each row that is open: when you open it, and when a refresh re-opens
+  the rows that were open. Texts up to 16 Ki chars are kept for the session, so those are read once.
+  It reads `~/.npmrc`.
   It writes nothing to your project. Requests are remembered in Herdr's `shared.json`.
 - **Programs:** it runs `printenv` to read your token, `xdg-open` or `open` when you click a row, and
   `npm login` when you click Sign in. For a Go project `printenv` also reads `GOMODCACHE` and `GOPATH`

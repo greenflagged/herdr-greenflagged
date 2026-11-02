@@ -260,7 +260,7 @@ export function expandNode(tree, node, keys) {
 // shortest paths first. It drops paths whose packages are gone (a version change
 // gives a new key) or can no longer expand. A path whose expansion fails is dropped
 // too, so its row draws ▸ and one click retries; the other paths still reopen, and
-// the first error is thrown once they have.
+// the first error is thrown once they have, with the node that failed as `node`.
 export async function expandPaths(tree, expanded) {
   const saved = [...expanded].map((path) => {
     try { return { path, keys: keysOf(path) }; } catch { return { path, keys: null }; }
@@ -274,7 +274,7 @@ export async function expandPaths(tree, expanded) {
       if (!node || node.leaf || broken.has(node)) { found = false; break; }
       if (!node.children) {
         try { await expandNode(tree, node, keys.slice(0, i + 1)); } catch (error) {
-          failure ??= { error };
+          failure ??= { error, node };
           broken.add(node);
           found = false;
           break;
@@ -284,7 +284,7 @@ export async function expandPaths(tree, expanded) {
     }
     if (!found) expanded.delete(path);
   }
-  if (failure) throw failure.error;
+  if (failure) throw Object.assign(new Error(String(failure.error?.message ?? failure.error)), { cause: failure.error, node: failure.node });
 }
 
 // The rows to draw, depth first. Recurses only into expanded rows whose children
@@ -318,6 +318,14 @@ export function countsLine(tree) {
 export const NO_LOCKFILE_NOTE = "No lockfile, so only direct dependencies are shown.";
 export const MAX_LOCK_CHARS = 16 * 1024 * 1024; // a bigger lockfile isn't parsed
 export const failedNote = (file, error) => `Couldn't read ${file ?? "the lockfile"}: ${String(error?.message ?? error)}`;
+
+// The note for a row that failed to open. A deferred row's children come from its own
+// file (a Go module's `.mod` in the cache), so the note names the module; any other
+// row's come from the lockfile, so it names that.
+export function expandFailedNote(tree, node, error) {
+  const label = node?.deferred ? [node.name, node.version].filter(Boolean).join(" ") : "";
+  return failedNote(label || tree.lockFile, error);
+}
 
 // The tree for a project (`deps` from its ecosystem's `parse`), with `note` and
 // `lockFile` set. `lock` is { file, text, resolver } or null when no lockfile was
@@ -360,7 +368,11 @@ export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_N
   tree.lockFile = lock?.file ?? null;
   tree.lazy = typeof tree.load === "function";
   tree.cacheBacked = Boolean(lock?.cache);
-  try { await expandPaths(tree, expanded); } catch (error) { tree.note ??= failedNote(tree.lockFile, error); }
+  // A failed re-open is noted like a failed click (main.js), as `expandNote`, so a later
+  // successful open clears it. A note the build already set is kept.
+  try { await expandPaths(tree, expanded); } catch (error) {
+    if (!tree.note) tree.note = tree.expandNote = expandFailedNote(tree, error.node, error.cause ?? error);
+  }
   return tree;
 }
 
