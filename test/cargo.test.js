@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { findManifest } from "../mods/greenflagged/audit.js";
 import {
-  CARGO_LOCKFILES, CARGO_NOTE, cargoPackages, cargoResolver, parseCargoToml, parseLockDependency,
+  CARGO_LOCKFILES, CARGO_NOTE, cargoAllows, cargoPackages, cargoResolver, parseCargoToml, parseLockDependency,
 } from "../mods/greenflagged/cargo.js";
 import { parseToml } from "../mods/greenflagged/toml.js";
 import { countsLine, expandNode, treeForProject } from "../mods/greenflagged/tree.js";
@@ -36,6 +36,11 @@ test("parseCargoToml reads a single crate's dependency tables", () => {
     { name: "libc", constraint: "0.2", dev: false, marker: "cfg(unix)" },
   ]);
   assert.deepEqual(project.skipped, ["local-util", "from-git", "pinned-path"]);
+  assert.deepEqual(project.local, [
+    { name: "local-util", constraint: null, dev: false },
+    { name: "from-git", constraint: null, dev: false },
+    { name: "pinned-path", constraint: null, dev: false },
+  ]);
 });
 
 test("parseCargoToml shows a renamed dependency under its real crate name", () => {
@@ -91,6 +96,47 @@ test("parseCargoToml inherits workspace = true from [workspace.dependencies] in 
   assert.deepEqual(skipped, ["util"]);
 });
 
+test("parseCargoToml reads dev and build tables under [target.<cfg>], and keeps a skipped dependency's table", () => {
+  const { deps, local } = parseCargoToml([
+    '[package]', 'name = "a"',
+    "[target.'cfg(windows)'.dev-dependencies]", 'winapi-test = "0.3"', 'helper = { path = "helper" }',
+    "[target.'cfg(unix)'.build-dependencies]", 'pkg-config = "0.3"',
+  ].join("\n"));
+  assert.deepEqual(deps, [
+    { name: "winapi-test", constraint: "0.3", dev: true, marker: "cfg(windows)" },
+    { name: "pkg-config", constraint: "0.3", dev: false, marker: "cfg(unix)" },
+  ]);
+  assert.deepEqual(local, [{ name: "helper", constraint: null, dev: true, marker: "cfg(windows)" }]);
+});
+
+test("parseCargoToml takes the crate from the workspace entry, ignoring a member's own package", () => {
+  const { deps, skipped } = parseCargoToml([
+    '[package]', 'name = "root"',
+    '[workspace.dependencies]', 'foo = "1.2"', 'bar = { package = "real-bar", version = "2" }',
+    '[dependencies]',
+    'foo = { workspace = true, package = "other" }',
+    'bar = { workspace = true, package = "other-bar" }',
+    'baz = { workspace = true, package = "other-baz" }',
+  ].join("\n"));
+  assert.deepEqual(deps, [
+    { name: "foo", constraint: "1.2", dev: false },
+    { name: "real-bar", constraint: "2", dev: false },
+    { name: "baz", constraint: "workspace", dev: false },
+  ]);
+  assert.deepEqual(skipped, []);
+});
+
+test("parseCargoToml treats __proto__ = { workspace = true } as a crate the workspace table lacks", () => {
+  const { deps } = parseCargoToml([
+    '[package]', 'name = "a"', '[workspace.dependencies]', 'serde = "1"',
+    '[dependencies]', '__proto__ = { workspace = true }', 'constructor.workspace = true',
+  ].join("\n"));
+  assert.deepEqual(deps, [
+    { name: "__proto__", constraint: "workspace", dev: false },
+    { name: "constructor", constraint: "workspace", dev: false },
+  ]);
+});
+
 test("parseCargoToml shows workspace = true as the constraint workspace in a member's manifest", () => {
   const { deps } = parseCargoToml('[package]\nname = "member"\n[dependencies]\nserde.workspace = true\n');
   assert.deepEqual(deps, [{ name: "serde", constraint: "workspace", dev: false }]);
@@ -106,7 +152,7 @@ test("parseCargoToml lists a virtual manifest's members", () => {
 });
 
 test("parseCargoToml answers no dependencies for a manifest with neither [package] nor [workspace]", () => {
-  assert.deepEqual(parseCargoToml(""), { name: null, deps: [], skipped: [] });
+  assert.deepEqual(parseCargoToml(""), { name: null, deps: [], skipped: [], local: [] });
 });
 
 test("parseCargoToml treats __proto__ as a plain crate name", () => {
@@ -150,17 +196,20 @@ test("a single crate shows its tree, with the twice-locked crate at the version 
   assert.equal(tree.lockFile, "Cargo.lock");
   assert.deepEqual(summary(tree.roots), [
     ["cc", "1.2.25", null, false],
+    ["from-git", "0.2.0", null, false], // path and git directs come from the project's lock entry
     ["libc", "0.2.172", "cfg(unix)", false],
+    ["local-util", "0.1.0", null, false],
     ["log", "0.4.27", null, false],
+    ["pinned-path", "0.3.1", null, false],
     ["proptest", "1.6.0", null, true],
     ["serde", "1.0.219", null, false],
     ["serde_json", "1.0.140", null, false],
     ["syn", "2.0.101", null, false],
     ["tokio", "1.45.1", null, false],
   ]);
-  // 8 directs; runtime adds serde_derive, proc-macro2, quote, unicode-ident, itoa, memchr, ryu,
-  // pin-project-lite, shlex; dev adds num-derive and syn 1.0.109.
-  assert.equal(countsLine(tree), "8 direct, 19 total");
+  // 11 directs (8 registry, 3 path or git); runtime adds serde_derive, proc-macro2, quote,
+  // unicode-ident, itoa, memchr, ryu, pin-project-lite, shlex; dev adds num-derive and syn 1.0.109.
+  assert.equal(countsLine(tree), "11 direct, 22 total");
 });
 
 test("a transitive edge that names a version resolves to that version", async () => {
@@ -198,10 +247,45 @@ test("a direct the lock lacks is a leaf with its constraint", async () => {
   assert.equal(missing.leaf, true);
 });
 
-test("without the project's own lock entry, the directs resolve by name", async () => {
+test("without the project's own lock entry, a twice-locked direct takes the version its constraint allows", async () => {
   const tree = await singleTree({ ...singleProject(), name: "renamed" });
-  assert.equal(find(tree.roots, "syn").version, "1.0.109"); // first locked version: no root entry to say otherwise
+  assert.equal(find(tree.roots, "syn").version, "2.0.101"); // syn = "2", though 1.0.109 is locked first
   assert.equal(find(tree.roots, "serde").version, "1.0.219");
+  assert.equal(find(tree.roots, "from-git"), undefined); // no lock entry to list path and git directs
+  const project = singleProject();
+  project.name = null;
+  project.deps = project.deps.map((dep) => (dep.name === "syn" ? { ...dep, constraint: "1" } : dep));
+  assert.equal(find((await singleTree(project)).roots, "syn").version, "1.0.109");
+});
+
+test("cargoAllows reads Cargo's requirement forms", () => {
+  const cases = [
+    ["2.0.101", "2", true], ["1.0.109", "2", false], ["0.2.172", "0.2", true], ["0.3.0", "0.2", false],
+    ["0.0.3", "^0.0.3", true], ["0.0.4", "^0.0.3", false], ["0.0.9", "0.0", true], ["0.1.0", "0.0", false],
+    ["1.2.9", "~1.2.3", true], ["1.3.0", "~1.2.3", false], ["1.9.0", "~1", true],
+    ["1.0.5", "=1.0.5", true], ["1.0.6", "=1.0.5", false], ["1.2.7", "=1.2", true],
+    ["2.5.0", ">=1, <3", true], ["3.0.0", ">=1, <3", false], ["1.4.0", "1.*", true], ["2.0.0", "1.*", false],
+    ["9.9.9", "*", true],
+  ];
+  for (const [version, requirement, want] of cases) assert.equal(cargoAllows(version, requirement), want, `${version} ${requirement}`);
+  for (const requirement of ["workspace", "", "1,", "^", null]) assert.equal(cargoAllows("1.0.0", requirement), null, String(requirement));
+});
+
+test("a root package that is also a workspace picks its own lock entry by name", async () => {
+  const project = parseCargoToml([
+    '[package]', 'name = "app"', '[workspace]', 'members = ["crates/x"]',
+    '[dependencies]', 'x = { path = "crates/x" }', 'syn = "1"',
+  ].join("\n"));
+  const text = [
+    '[[package]]', 'name = "x"', 'version = "0.1.0"', 'dependencies = ["syn 2.0.101"]',
+    '[[package]]', 'name = "app"', 'version = "0.1.0"', 'dependencies = ["syn 1.0.109", "x"]',
+    '[[package]]', 'name = "syn"', 'version = "1.0.109"', 'source = "registry+https://github.com/rust-lang/crates.io-index"',
+    '[[package]]', 'name = "syn"', 'version = "2.0.101"', 'source = "registry+https://github.com/rust-lang/crates.io-index"',
+  ].join("\n");
+  const tree = await treeForProject(project, lock(text), { noLockNote: CARGO_NOTE });
+  assert.equal(tree.note, null);
+  assert.deepEqual(summary(tree.roots), [["syn", "1.0.109", null, false], ["x", "0.1.0", null, false]]);
+  assert.equal(countsLine(tree), "2 direct, 3 total");
 });
 
 test("a virtual workspace's top level is its crates, each with its own subtree", async () => {
