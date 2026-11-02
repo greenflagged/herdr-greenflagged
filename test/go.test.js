@@ -133,7 +133,31 @@ test("a block opener inside an open block starts the new block instead of listin
   assert.deepEqual(pairs(readGoMod("exclude (\n\tx v1.0.0\nrequire (\n\ty v1.0.0\n)\n").direct), [["y", "v1.0.0"]]);
 });
 
-test("exclude, retract, go, toolchain, godebug, tool and unknown directives are ignored, line or block", () => {
+test("a directive line closes a truncated block, for every directive keyword", () => {
+  const keywords = ["module", "go", "toolchain", "godebug", "require", "replace", "exclude", "retract", "tool", "ignore"];
+  const lines = {
+    module: "module example.com/m", go: "go 1.22", toolchain: "toolchain go1.22.4", godebug: "godebug default=go1.21",
+    require: "require c v1.0.0", replace: "replace a => b v2.0.0", exclude: "exclude a v0.9.0",
+    retract: "retract v1.0.1", tool: "tool golang.org/x/tools/cmd/stringer", ignore: "ignore ./node_modules",
+  };
+  for (const keyword of keywords) {
+    for (const directive of [lines[keyword], `${keyword} (`]) {
+      // The truncated block, then the directive, then a later single-line require and replace.
+      const text = `require (\n\ta v1.0.0\n${directive}\nrequire d v1.0.0\nreplace d => e v3.0.0\n`;
+      const result = readGoMod(text);
+      const names = [...result.direct, ...result.indirect].map((m) => m.name);
+      for (const k of keywords) assert.ok(!names.includes(k), `${directive}: lists module ${k}`);
+      assert.ok(names.includes("e"), `${directive}: later replace lost`);
+      assert.ok(names.includes("b") || names.includes("a"), `${directive}: block line lost`);
+    }
+  }
+  // The finding's case: the replace and require after the truncated block both apply.
+  const result = readGoMod("require (\n\ta v1.0.0\nreplace a => b v2.0.0\nrequire c v1.0.0\n");
+  assert.deepEqual(pairs(result.direct), [["b", "v2.0.0"], ["c", "v1.0.0"]]);
+  assert.equal(readGoMod("require (\n\ta v1.0.0\nmodule example.com/m\n").name, "example.com/m");
+});
+
+test("exclude, retract, go, toolchain, godebug, tool, ignore and unknown directives are ignored, line or block", () => {
   const base = "module m\nrequire a v1.0.0\n";
   const want = readGoMod(base);
   for (const extra of [
@@ -141,6 +165,7 @@ test("exclude, retract, go, toolchain, godebug, tool and unknown directives are 
     "retract v1.0.1\n", "retract (\n\tv1.0.1 // oops\n\t[v1.1.0, v1.1.5] // broken\n)\n",
     "go 1.22\n", "go (\n\t1.22\n)\n", "toolchain go1.22.4\n", "godebug default=go1.21\n", "godebug (\n\tpanicnil=1\n)\n",
     "tool golang.org/x/tools/cmd/stringer\n", "tool (\n\tgolang.org/x/tools/cmd/stringer\n)\n",
+    "ignore ./node_modules\n", "ignore (\n\t./vendor\n)\n",
     "frobnicate b v1.0.0\n", "frobnicate (\n\tb v1.0.0\n\tc v2.0.0\n)\n",
   ]) {
     assert.deepEqual(readGoMod(base + extra), want, extra);

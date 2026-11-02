@@ -28,8 +28,9 @@
 // - A replacement by a local path (`./x`, `../x`, `/abs`, or anything with no version)
 //   drops the module from the tree and counts it on the "not checked" line under its
 //   original path. A `replace` of a module go.mod doesn't require is ignored.
-// - `exclude`, `retract`, `go`, `toolchain`, `godebug`, `tool` and unknown directives
-//   are ignored, single-line or in a `( … )` block.
+// - `exclude`, `retract`, `go`, `toolchain`, `godebug`, `tool`, `ignore` and unknown
+//   directives are ignored, single-line or in a `( … )` block. A block left open (no `)`)
+//   ends at the next line starting with a directive keyword or a block opener.
 // - The indirect row is a group (`group: true` on the direct, see tree.js), keyed so no
 //   module path can collide with it. A hand-written go.mod requiring a module literally
 //   named `indirect` shows two rows: the module, then the group.
@@ -70,6 +71,9 @@ function readReplace(args) {
   };
 }
 
+// go.mod's directive keywords (https://go.dev/ref/mod#go-mod-file-grammar).
+const DIRECTIVES = new Set(["module", "go", "toolchain", "godebug", "require", "replace", "exclude", "retract", "tool", "ignore"]);
+
 // `<directive> (` or `<directive>(` → the directive, else null.
 function blockOpener(tokens) {
   if (tokens.length === 2 && tokens[1] === "(") return tokens[0];
@@ -96,15 +100,18 @@ export function readGoMod(text) {
   for (const raw of text.split(/\r?\n/)) {
     const { tokens, indirect } = lineTokens(raw);
     if (!tokens.length) continue;
-    // A block opener inside an open block (Go rejects it) starts the new block, so a
-    // truncated block can't swallow the next one or list `require` as a module.
+    // Inside a block, a line starting with a directive keyword, or any block opener,
+    // closes the block (Go rejects both there) and is then read as a top-level line. So
+    // a block missing its `)` can't swallow later directives or list a module named
+    // `require`. The trade: a block line whose path is exactly a keyword is not listed.
     const opens = blockOpener(tokens);
-    if (opens !== null) { block = opens; continue; }
-    if (block !== null) {
-      if (tokens[0] === ")") block = null;
-      else act(block, tokens, indirect);
+    if (block !== null && tokens[0] !== ")" && opens === null && !DIRECTIVES.has(tokens[0])) {
+      act(block, tokens, indirect);
       continue;
     }
+    block = null;
+    if (tokens[0] === ")") continue;
+    if (opens !== null) { block = opens; continue; }
     act(tokens[0], tokens.slice(1), indirect);
   }
 
@@ -119,8 +126,9 @@ export function readGoMod(text) {
   const skipped = new Set();
   const replaceFor = (path, version) =>
     replaces.find((r) => r.from === path && r.fromVersion === version) ?? replaces.find((r) => r.from === path && r.fromVersion === null);
-  // Two required modules replaced by the same module@version are one module in the build,
-  // so they are one row, its marker naming every path it replaces. A direct row absorbs
+  // Two required modules replaced by the same module@version share one row, its marker
+  // naming every path it replaces. That is a display choice: Go itself rejects a go.mod
+  // that replaces two modules with the same module@version. A direct row absorbs
   // an indirect one, as a direct line beats an indirect one above.
   const rows = new Map();
   const apply = (map) => {
