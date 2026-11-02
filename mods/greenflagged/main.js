@@ -124,8 +124,9 @@ export default class Greenflagged extends View {
   // Each folder change restarts this; `watched` is what ends the old loop.
   watch(project, on, cx) {
     if (on) { this.watched = null; return; } // watchFolder is local only
-    if (this.watched === project.folder) return;
-    const { folder } = project;
+    // The build root, when a manifest reads files above its own folder (Gradle).
+    const folder = project.root ?? project.folder;
+    if (this.watched === folder) return;
     this.watched = folder;
     cx.spawn(async (cx) => {
       try {
@@ -382,7 +383,7 @@ export default class Greenflagged extends View {
 
   // Plain rows with no dots: the dots mean verdicts, and this tree gives none.
   treeBody(t, note) {
-    if (!this.tree) return note(`Greenflagged doesn't check ${this.project.ecosystem.name} dependencies yet.`);
+    if (!this.tree) return note(`Greenflagged doesn't check ${this.project.language ?? this.project.ecosystem.name} dependencies yet.`);
     // A file with no dependency tables at all (pyproject's `dynamic = ["dependencies"]`)
     // may well have dependencies, declared somewhere this panel doesn't read.
     if (!this.tree.roots.length) {
@@ -462,7 +463,7 @@ export default class Greenflagged extends View {
           .child(pill(counts.attention, this.stale ? t.dim : t.ansi3, "attention"))
           .child(pill(counts.blocked, this.stale ? t.dim : t.ansi1, "blocked"))))
         .when(this.state === "unsupported" && Boolean(this.project), (el) => el.child(
-          div().text_size(12).text_color(t.muted).child(`Not checked: ${this.project.ecosystem.name}`)))
+          div().text_size(12).text_color(t.muted).child(`Not checked: ${this.project.language ?? this.project.ecosystem.name}`)))
         .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(
           div().text_size(12).text_color(t.dim).child(countsLine(this.tree))))
         .when(this.state === "unsupported" && Boolean(this.message), (el) => el.child(

@@ -46,7 +46,18 @@ Levels and labels come from the audit `status`:
   When the winner can't be audited, it sends no request. A Python project shows a plain tree of its
   dependencies, read from `uv.lock` or `poetry.lock` beside the manifest when there is one. A Go project
   shows a plain tree read from `go.mod` alone (direct modules, an "indirect" group, `replace` applied;
-  `go.js`'s header lists the edge cases). Rust says "Greenflagged doesn't check Rust dependencies yet." A `pyproject.toml` with no dependency
+  `go.js`'s header lists the edge cases). It also looks for `pom.xml`, then `build.gradle.kts`, then
+  `build.gradle` (Java/Kotlin, after `go.mod`). A Maven project shows its POM's direct dependencies
+  (`maven.js`'s header lists the edge cases) and a sentence saying the full tree needs
+  `mvn dependency:tree`, which the panel doesn't run. A Gradle project shows the dependencies its build
+  file declares, matched as text and never evaluated, with `libs.*` resolved from
+  `gradle/libs.versions.toml`, read from the build root: the nearest folder holding
+  `settings.gradle.kts` or `settings.gradle`, found from the build file's folder upward, stopping
+  before home unless the build file is in home itself. With `gradle.lockfile` beside the build file, the locked versions fill the rows and the other
+  locked entries sit under a collapsed "resolved" row; without one, a sentence says the full tree needs
+  `gradle dependencies` (`gradle.js`'s header lists the edge cases). The header reads "Not checked:
+  Kotlin" when the build applies a Kotlin plugin, else "Not checked: Java/Kotlin". Rust says
+  "Greenflagged doesn't check Rust dependencies yet." A `pyproject.toml` with no dependency
   tables at all (`dynamic = ["dependencies"]`) gives way to a `requirements.txt` beside it.
 - It audits on ↻, every 15 minutes, and when a project or its dependencies change, unless that exact
   project and dependency list was audited in the last 5 minutes. Saving with the same dependencies or
@@ -116,6 +127,18 @@ Levels and labels come from the audit `status`:
   shape only, and it can be wrong both ways: a `go.mod` that passes may be one Go rejects (`exclude
   a`), and one Go accepts may be refused (`tool v1.0.0` inside a `require` block). Its header lists
   the Go edge cases and the full definition.
+- `xml.js`: pure logic, a small XML reader for `pom.xml`: elements, text, comments and CDATA, in one
+  linear pass with a 1 MiB cap. It refuses `<!DOCTYPE`, `<!ENTITY` and any entity beyond the five
+  predefined ones and numeric references, so it never fetches a DTD or expands an entity. Its header
+  records its Node timing.
+- `maven.js`: pure logic, Maven's half of the tree: a POM's `<dependencies>` with `${…}` filled from
+  `<properties>`, scopes read as `dev` or a tag, and a version left to a parent or BOM shown as
+  `managed`. It runs no `mvn` and reads no `~/.m2`. Its header lists the Maven edge cases.
+- `gradle.js`: pure logic, Gradle's half of the tree: a build file cut into tokens and matched against
+  the common dependency forms, never evaluated; `settings.gradle(.kts)` for the project name and
+  subprojects; the version catalog through `toml.js`; and `gradle.lockfile` as the lockfile, with a
+  "resolved" group like Go's "indirect". It runs no `gradle` and reads no `~/.gradle`. Its header lists
+  the forms it matches and the Gradle edge cases, and records its Node timing.
 - `main.js`: the `View`. From `herdr`: `spaces`, `panes`, `focused`, `exec`, `home`, `readTextFile`,
   `watchFolder`, `theme`. It runs `printenv`, `xdg-open` then `open` for links, and
   `npm login` through `run("tab.new", { name, argv, folder })`.
@@ -166,6 +189,13 @@ Levels and labels come from the audit `status`:
   changes on the timer or ↻.
 - Never put the token in `localStorage` or draw it.
 - Never call `resolve_dep_tree` for this: it queues imports unless `autoRequest` is false.
+- A Gradle subproject reads `settings.gradle(.kts)`, `gradle/libs.versions.toml` and the root's build
+  file from its build root, above its own folder, so the panel watches the build root
+  (`project.root`), not the subproject's folder. The walk to find that root reads home only when the
+  build file is in home itself, which the panel already watches, so it never starts watching home
+  for a project below it.
+  An unrelated settings file between the project and home is taken as the root, as Gradle itself
+  would.
 
 ## Done when
 
@@ -194,4 +224,13 @@ Levels and labels come from the audit `status`:
   from `go.mod` with versions, then a dim `▸ indirect` row that opens to the `// indirect` modules, with
   no yellow note: `github.com/brizzai/fleet` (11 direct, 28 indirect) reads "11 direct, 39 total", and
   the rail shows `11`.
+- A Maven project shows "Not checked: Java/Kotlin" (or "Kotlin" with `kotlin-maven-plugin`), its direct
+  dependencies with `dev`, `provided` and `runtime` tags, and the yellow Maven sentence. A Kotlin Gradle
+  project shows "Not checked: Kotlin", its catalog dependencies resolved, the root project's name from
+  the root folder and the subproject's folder name from a subproject folder, where the catalog still
+  resolves. The root lists its subprojects after its own rows, each as a `▸` row that opens to that
+  module's own dependencies (read from its build file) and its links to other modules, and the
+  counts line adds what's under them to the total; a `subprojects { }` dependency is tagged
+  `every module` at the root and shows in each module too, and a version pinned by
+  `dependencyManagement { }` or `constraints { }` replaces `managed`.
 - A repo with both `package.json` and `pyproject.toml` still gets the npm audit.

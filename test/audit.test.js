@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   AUDIT_TTL_MS, ECOSYSTEMS, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc, lastValidProject, staleNote,
@@ -38,11 +39,15 @@ test("findManifest prefers an audited manifest within one folder", async () => {
 });
 
 test("WATCHED_FILES lists every manifest once", () => {
-  assert.deepEqual(WATCHED_FILES, ["package.json", "pyproject.toml", "uv.lock", "poetry.lock", "requirements.txt", "Cargo.toml", "go.mod"]);
+  assert.deepEqual(WATCHED_FILES, [
+    "package.json", "pyproject.toml", "uv.lock", "poetry.lock", "requirements.txt", "Cargo.toml", "go.mod", "pom.xml",
+    "build.gradle.kts", "gradle.lockfile", "settings.gradle.kts", "settings.gradle", "gradle/libs.versions.toml", "build.gradle",
+  ]);
 });
 
 test("findManifest names each unaudited language", async () => {
-  for (const [file, name] of [["pyproject.toml", "Python"], ["requirements.txt", "Python"], ["Cargo.toml", "Rust"], ["go.mod", "Go"]]) {
+  for (const [file, name] of [["pyproject.toml", "Python"], ["requirements.txt", "Python"], ["Cargo.toml", "Rust"], ["go.mod", "Go"],
+    ["pom.xml", "Java/Kotlin"], ["build.gradle.kts", "Java/Kotlin"], ["build.gradle", "Java/Kotlin"]]) {
     const project = await findManifest("/r", "/Users/a", files({ [`/r/${file}`]: "" }));
     assert.equal(project.ecosystem.name, name, file);
   }
@@ -100,6 +105,12 @@ test("findManifest keeps list order among unaudited manifests in one folder", as
   const { "/r/pyproject.toml": _p, ...noPyproject } = all;
   assert.equal((await findManifest("/r", "/Users/a", files(noPyproject))).path, "/r/requirements.txt");
   assert.equal((await findManifest("/r", "/Users/a", files({ "/r/Cargo.toml": "", "/r/go.mod": "" }))).path, "/r/Cargo.toml");
+  const jvm = { "/r/pom.xml": "<project/>", "/r/build.gradle.kts": "", "/r/build.gradle": "" };
+  assert.equal((await findManifest("/r", "/Users/a", files({ ...jvm, "/r/go.mod": "" }))).path, "/r/go.mod");
+  assert.equal((await findManifest("/r", "/Users/a", files(jvm))).path, "/r/pom.xml");
+  const { "/r/pom.xml": _m, ...gradle } = jvm;
+  assert.equal((await findManifest("/r", "/Users/a", files(gradle))).path, "/r/build.gradle.kts");
+  assert.equal((await findManifest("/r", "/Users/a", files({ "/r/build.gradle": "" }))).path, "/r/build.gradle");
 });
 
 test("findManifest reads requirements.txt when pyproject.toml declares no dependency tables", async () => {
@@ -404,4 +415,130 @@ test("lastValidProject never carries a view across machines", async () => {
 
 test("staleNote puts the parse error first and says the view is the last valid one", () => {
   assert.equal(staleNote("go.mod line 7: x"), "go.mod line 7: x · showing the last valid version");
+});
+
+// --- companions (Gradle's build root) ------------------------------------------------
+
+const recording = (tree) => {
+  const seen = [];
+  return { seen, read: async (path) => { seen.push(path); return tree[path] ?? null; } };
+};
+const TIER_2 = ["pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod", "pom.xml", "build.gradle.kts", "build.gradle"];
+
+test("a subproject's build root is the nearest folder with a settings file, and the catalog is read there", async () => {
+  const { seen, read } = recording({
+    "/home/u/r/app/build.gradle.kts": 'dependencies {\n implementation(libs.ktor)\n}',
+    "/home/u/r/settings.gradle.kts": 'rootProject.name = "big"\ninclude(":app")',
+    "/home/u/r/gradle/libs.versions.toml": '[libraries]\nktor = "io.ktor:ktor-server-core:2.3.11"',
+  });
+  const project = await findManifest("/home/u/r/app", "/home/u", read);
+  assert.equal(project.path, "/home/u/r/app/build.gradle.kts");
+  assert.equal(project.folder, "/home/u/r/app");
+  assert.equal(project.root, "/home/u/r");
+  assert.equal(project.name, "app");
+  assert.deepEqual(project.deps, [{ name: "io.ktor:ktor-server-core", constraint: "2.3.11", dev: false }]);
+  const manifestReads = ["/home/u/r/app/package.json", ...TIER_2.map((f) => `/home/u/r/app/${f}`)];
+  assert.deepEqual(seen, [
+    ...manifestReads,
+    "/home/u/r/app/settings.gradle.kts", "/home/u/r/app/settings.gradle",
+    "/home/u/r/settings.gradle.kts", "/home/u/r/settings.gradle",
+    "/home/u/r/gradle/libs.versions.toml", "/home/u/r/build.gradle.kts", "/home/u/r/build.gradle",
+  ]);
+});
+
+test("the walk for a build root never reads home", async () => {
+  const { seen, read } = recording({
+    "/home/u/r/app/build.gradle.kts": "",
+    "/home/u/settings.gradle.kts": 'include(":everything")',
+    "/home/u/r/app/gradle/libs.versions.toml": "",
+  });
+  const project = await findManifest("/home/u/r/app", "/home/u", read);
+  assert.equal(project.root, "/home/u/r/app");
+  const companionReads = seen.slice(1 + TIER_2.length);
+  assert.ok(!companionReads.some((p) => p.startsWith("/home/u/settings")), companionReads.join(", "));
+  assert.deepEqual(companionReads, [
+    "/home/u/r/app/settings.gradle.kts", "/home/u/r/app/settings.gradle",
+    "/home/u/r/settings.gradle.kts", "/home/u/r/settings.gradle",
+    "/home/u/r/app/gradle/libs.versions.toml", "/home/u/r/app/build.gradle.kts", "/home/u/r/app/build.gradle",
+  ]);
+});
+
+test("with no settings file anywhere, the build file's folder is the root", async () => {
+  const { seen, read } = recording({ "/srv/p/build.gradle": "" });
+  const project = await findManifest("/srv/p", "/Users/a", read);
+  assert.equal(project.root, "/srv/p");
+  assert.deepEqual(seen.slice(-3), ["/srv/p/gradle/libs.versions.toml", "/srv/p/build.gradle.kts", "/srv/p/build.gradle"]);
+  assert.ok(!seen.includes("/settings.gradle.kts")); // `/` is never read for a root marker
+});
+
+test("a manifest directly in home may find its settings there", async () => {
+  const project = await findManifest("/home/u", "/home/u", files({ "/home/u/build.gradle.kts": "", "/home/u/settings.gradle.kts": 'rootProject.name = "h"' }));
+  assert.equal(project.root, "/home/u");
+  assert.equal(project.name, "h");
+});
+
+test("a malformed build file still carries its build root", async () => {
+  const project = await findManifest("/home/u/r/app", "/home/u", files({
+    "/home/u/r/app/build.gradle.kts": 'dependencies { implementation("never closed }',
+    "/home/u/r/settings.gradle.kts": "",
+  }));
+  assert.match(project.error, /^build\.gradle\.kts line 1: /);
+  assert.equal(project.root, "/home/u/r");
+});
+
+test("companions are never read for go.mod", async () => {
+  const { seen, read } = recording({ "/r/go.mod": "module r" });
+  const project = await findManifest("/r", "/Users/a", read);
+  assert.deepEqual(seen, ["/r/package.json", ...TIER_2.map((f) => `/r/${f}`)]);
+  assert.equal(project.root, "/r");
+});
+
+test("an entry without companions, and the requirements.txt fallback, have root equal to folder", async () => {
+  assert.equal((await findManifest("/r", "/Users/a", files({ "/r/package.json": "{}" }))).root, "/r");
+  const fallback = await findManifest("/r", "/Users/a", files({ "/r/pyproject.toml": "[build-system]", "/r/requirements.txt": "x\n" }));
+  assert.equal(fallback.path, "/r/requirements.txt");
+  assert.equal(fallback.root, "/r");
+});
+
+test("parse gets every companion name, null when missing, and both folders", async () => {
+  const gradle = ECOSYSTEMS.find((e) => e.file === "build.gradle.kts");
+  const original = gradle.parse, calls = [];
+  gradle.parse = (text, context) => { calls.push(context); return { name: null, deps: [], skipped: [] }; };
+  try {
+    await findManifest("/home/u/r/app", "/home/u", files({ "/home/u/r/app/build.gradle.kts": "", "/home/u/r/settings.gradle": "s" }));
+  } finally { gradle.parse = original; }
+  assert.deepEqual(calls, [{
+    files: { "settings.gradle.kts": null, "settings.gradle": "s", "gradle/libs.versions.toml": null, "build.gradle.kts": null, "build.gradle": null },
+    root: "/home/u/r",
+    folder: "/home/u/r/app",
+  }]);
+});
+
+test("a Kotlin Gradle build's language lands on the project; a Java one has none", async () => {
+  const kotlin = await findManifest("/r", "/Users/a", files({ "/r/build.gradle.kts": 'plugins { kotlin("jvm") }' }));
+  assert.equal(kotlin.language, "Kotlin");
+  const java = await findManifest("/r", "/Users/a", files({ "/r/build.gradle": "plugins { id 'java' }" }));
+  assert.equal("language" in java, false);
+});
+
+// Steward W3's number: every folder without a manifest costs one read per registered
+// manifest. Act when the second tier passes ~10 names.
+test("a 12-deep path with no manifest costs one read per manifest per folder", async () => {
+  const { seen, read } = recording({});
+  const deep = "/a/b/c/d/e/f/g/h/i/j/k/l";
+  assert.equal(await findManifest(deep, "/home/u", read), null);
+  assert.equal(ECOSYSTEMS.length, 8);
+  assert.equal(seen.length, 12 * 8);
+});
+
+// README's list of files read is a privacy disclosure, so it must name every watched file.
+test("README and RECIPE name every file the panel reads", () => {
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const recipe = readFileSync(new URL("../RECIPE.md", import.meta.url), "utf8");
+  const files = readme.slice(readme.indexOf("**Files:**"), readme.indexOf("**Programs:**"));
+  assert.ok(files.length > 0);
+  for (const name of WATCHED_FILES) {
+    assert.ok(files.includes(`\`${name}\``), `README's Files bullet lacks ${name}`);
+    assert.ok(recipe.includes(`\`${name}\``), `RECIPE.md lacks ${name}`);
+  }
 });
