@@ -107,8 +107,9 @@ export async function findManifest(cwd, home, read) {
 // null when there is none (a different file, another machine, or no valid read yet). A
 // manifest being edited is often malformed for a moment, so on a parse error the panel
 // keeps showing that last valid project, dimmed and marked stale. A project's machine is
-// its `on` (null for this one), which the panel sets after findManifest. The panel holds
-// it in memory only; it is lost when the project changes or the panel closes.
+// its `on` field: null means this machine, and the panel sets it after findManifest. The
+// panel holds the last valid project in memory only; it is lost when the project changes
+// or the panel closes.
 export function lastValidProject(previous, failed) {
   if (!previous || previous.error || !failed) return null;
   return previous.path === failed.path && (previous.on ?? null) === (failed.on ?? null) ? previous : null;

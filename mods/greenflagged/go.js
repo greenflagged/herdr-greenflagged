@@ -36,7 +36,8 @@
 //     - a directive keyword or a block opener inside a block;
 //     - a `require` that isn't exactly a path and a version;
 //     - a stray `(` or `)` in a `require` or `replace`;
-//     - a `replace` with no `=>`, with more than one `=>`, or with more than two tokens on the left;
+//     - a `replace` with no `=>`, with more than one `=>`, with nothing left of `=>`, or
+//       with more than two tokens left of it;
 //     - a `replace` whose right side is neither a local path alone nor a path and a version.
 //   This checks the shape of the file only, and it can be wrong both ways. A go.mod that
 //   passes may still be one Go rejects (`exclude a`, with no version). A go.mod Go accepts

@@ -154,7 +154,8 @@ export default class Greenflagged extends View {
       try {
         const project = await findManifest(here.cwd, home(), (path) => readTextFile(path, { on: here.on }).catch(() => null));
         if (run !== this.run) return;
-        if (project) project.on = here.on ?? null; // the machine, so the last valid view never crosses one
+        // Record the machine, so the last valid view is never shown for a different machine.
+        if (project) project.on = here.on ?? null;
         if (!project) { this.project = null; this.list = null; this.watched = null; return settle("none"); }
         // Watched even when malformed, so fixing the file refreshes the panel.
         this.watch(project, here.on, cx);
@@ -169,7 +170,7 @@ export default class Greenflagged extends View {
           this.project = project; this.list = null;
           return settle("error", project.error);
         }
-        const changedProject = project.path !== this.project?.path;
+        const changedProject = project.path !== this.project?.path || project.on !== this.project?.on;
         if (changedProject) { this.tree = null; this.treeSource = null; this.expanded = new Set(); }
         // The tree is built and drawn only for unaudited projects. No request for a
         // language the registry can't check yet.
@@ -371,7 +372,7 @@ export default class Greenflagged extends View {
     const flagged = list.filter((r) => r.level !== "ok"), ok = list.filter((r) => r.level === "ok");
     const items = flagged.map((r) => this.row(r, t));
     if (ok.length) {
-      items.push(div().id("toggle-ok").px(10).py(5).text_size(12).text_color(t.muted).hover((s) => s.bg(t.hover))
+      items.push(div().id("toggle-ok").px(10).py(5).text_size(12).text_color(this.stale ? t.dim : t.muted).hover((s) => s.bg(t.hover))
         .on_mouse_down("left", stopPress).on_click((_e, cx) => { this.showOk = !this.showOk; cx.notify(); })
         .child(`${this.showOk ? "▾" : "▸"} ${ok.length} greenflagged`));
     }

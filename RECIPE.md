@@ -13,12 +13,13 @@ Top to bottom, 320 px wide, on theme `surface`:
 - **Counts**, 12 px: `N ok` in `ansi2`, `N attention` in `ansi3`, `N blocked` in `ansi1`.
 - **Notes**, 11 px, only when they apply: dependencies past the 500 cap, the number of local or git
   dependencies not checked, and the last error while older results stay on screen. A manifest can
-  fail to parse while you edit it. When that happens, the panel keeps the last valid list or tree of
-  the same file on the same machine on screen. The counts and rows are drawn in `dim`, so an old "all
-  clear" can't read as current. The error appears above them in `ansi1`, with " · showing the last
-  valid version" appended. If there was no earlier valid read, or you have moved to another project
-  or machine, the error shows alone. This state is held in memory only. For a local project the panel watches the
-  folder either way, so saving the fixed file refreshes it.
+  fail to parse while you edit it. When that happens, the panel keeps showing the last valid list or
+  tree. That view must be of the same file on the same machine. The counts and rows are drawn in
+  `dim`, so an old "all clear" can't read as current. The error shows in `ansi1` below the counts
+  and above the rows, with " · showing the last valid version" appended. If there was no earlier
+  valid read, or you have moved to another project or machine, the error shows alone. This state is
+  held in memory only. For a local project the panel watches the folder whether or not the manifest
+  parses, so saving the fixed file refreshes the panel.
 - **Rows**, scrolling. Each has a 7 px dot in its level's color, the package name, a `dev` tag for dev
   dependencies and a status label; below that, the constraint and `→ version`; below that, a reason if
   there is one.
