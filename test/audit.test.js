@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
-  AUDIT_TTL_MS, ECOSYSTEMS, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc, lastValidProject, staleNote,
+  AUDIT_TTL_MS, ECOSYSTEMS, NPM_NOTE, REFUSED_NOTE, auditOutcome, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc, lastValidProject, staleNote, staleState, screenAfterOutcome, screenAfterError,
 } from "../mods/greenflagged/audit.js";
+import { countsLine, treeForProject } from "../mods/greenflagged/tree.js";
 
 const toolReply = (result, extra = {}) => JSON.stringify({
   jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify(result) }], ...extra },
@@ -568,4 +569,83 @@ test("the Rust entry places a crate in its workspace and shapes a tree without a
   assert.equal(typeof cargo.gather, "function");
   assert.equal(typeof cargo.unlocked, "function");
   assert.equal(ECOSYSTEMS.filter((e) => e.gather || e.unlocked).length, 1);
+});
+
+// main.js can't load under Node, so the no-token fallback is decided here and tested here.
+test("with no token the audited view is the plain tree, whatever the status", () => {
+  for (const token of [null, undefined, ""]) {
+    for (const status of [undefined, 200, 401, 500]) {
+      assert.deepEqual(auditOutcome(token, status), { view: "tree", message: null, forget: false });
+    }
+  }
+});
+
+test("a refused token falls back to the tree with a note, and is forgotten", () => {
+  for (const status of [401, 403]) {
+    assert.deepEqual(auditOutcome("gflag_x", status), { view: "tree", message: REFUSED_NOTE, forget: true });
+  }
+  assert.equal(REFUSED_NOTE, "Greenflagged refused the token.");
+});
+
+test("a token the audit accepts shows the audit; any other answer is an error", () => {
+  assert.deepEqual(auditOutcome("gflag_x", 200), { view: "audit", message: null, forget: false });
+  assert.deepEqual(auditOutcome("gflag_x", 500), { view: "error", message: "Greenflagged answered 500.", forget: false });
+  assert.deepEqual(auditOutcome("gflag_x", 429), { view: "error", message: "Greenflagged answered 429.", forget: false });
+});
+
+test("an audit error drops a signed-out tree, so a later mid-edit isn't shown as signed out", () => {
+  const tree = { roots: [] };
+  const signedOut = { list: null, tree, treeSource: "s" };
+  assert.equal(staleState(signedOut, true), "signed-out");
+  const afterError = screenAfterOutcome(auditOutcome("gflag_x", 500), signedOut);
+  assert.deepEqual(afterError, { list: null, tree: null, treeSource: null });
+  assert.equal(staleState(afterError, true), null);
+});
+
+test("the tree outcome keeps the tree and drops the list; the audit outcome leaves both", () => {
+  const tree = { roots: [] }, list = [{ name: "a" }];
+  assert.deepEqual(screenAfterOutcome(auditOutcome(null), { list, tree, treeSource: "s" }), { list: null, tree, treeSource: "s" });
+  assert.deepEqual(screenAfterOutcome(auditOutcome("gflag_x", 200), { list, tree, treeSource: "s" }), { list, tree, treeSource: "s" });
+});
+
+test("a thrown request after sign-out drops the tree, so a mid-edit shows no sign-in line", () => {
+  const signedOut = { list: null, tree: { roots: [] }, treeSource: "s" };
+  const afterThrow = screenAfterError(signedOut);
+  assert.deepEqual(afterThrow, { list: null, tree: null, treeSource: null });
+  assert.equal(staleState(afterThrow, true), null);
+});
+
+test("an error keeps the last list on screen", () => {
+  const list = [{ name: "a" }];
+  assert.deepEqual(screenAfterError({ list, tree: null, treeSource: null }), { list, tree: null, treeSource: null });
+  assert.equal(staleState(screenAfterError({ list }), true), "error");
+});
+
+test("staleState follows what is on screen", () => {
+  assert.equal(staleState({ list: [], tree: null }, true), "error");
+  assert.equal(staleState({ list: null, tree: {} }, false), "unsupported");
+  assert.equal(staleState({ list: null, tree: null }, false), null);
+});
+
+test("the npm entry is audited, has its own note, and reads no lockfile", () => {
+  const npm = ECOSYSTEMS.find((e) => e.id === "npm");
+  assert.equal(npm.audited, true);
+  assert.equal(npm.note, NPM_NOTE);
+  assert.equal(npm.lockfiles, undefined);
+});
+
+test("a signed-out npm project's tree is its direct registry dependencies, with the npm note", async () => {
+  const read = files({ "/r/package.json": JSON.stringify({
+    name: "app",
+    dependencies: { lodash: "^4.17.0", local: "file:../local" },
+    devDependencies: { vitest: "^2.0.0" },
+  }) });
+  const project = await findManifest("/r", "/Users/a", read);
+  assert.equal(project.ecosystem.audited, true);
+  const tree = await treeForProject(project, null, { noLockNote: project.ecosystem.note });
+  assert.deepEqual(tree.roots.map((n) => [n.name, n.constraint, n.dev]), [["lodash", "^4.17.0", false], ["vitest", "^2.0.0", true]]);
+  assert.equal(tree.note, NPM_NOTE);
+  assert.equal(tree.lockFile, null);
+  assert.deepEqual(project.skipped, ["local"]);
+  assert.equal(countsLine(tree), "2 direct, 2 total");
 });

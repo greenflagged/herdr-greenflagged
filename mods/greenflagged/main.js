@@ -4,8 +4,8 @@ import {
   closeOverlay, exec, focused, home, layout, openOverlay, panes, props, readTextFile, run, setShared, shared, spaces, theme, watchFolder,
 } from "herdr";
 import {
-  MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditRequest, cachedAudit, findBlock, findManifest, lastValidProject, packageUrl, parentFolders,
-  parseToolResponse, rememberRequest, requestCall, rows, staleNote, storeAudit, summarize, tokenFromNpmrc, withRequests,
+  MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditOutcome, auditRequest, cachedAudit, findBlock, findManifest, lastValidProject, packageUrl, parentFolders,
+  parseToolResponse, rememberRequest, requestCall, rows, screenAfterError, screenAfterOutcome, staleNote, staleState, storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
 import { locateCache, openCache, sessionReader } from "./cache.js";
 import { countsLine, expandFailedNote, expandNode, topLevel, treeForProject, visibleRows } from "./tree.js";
@@ -107,7 +107,7 @@ export default class Greenflagged extends View {
   init(_props, cx) {
     const given = props() ?? {}; // `overlay` is only on props(), not on init's argument
     this.overlay = given.overlay ?? null; // set only on the detached window
-    this.state = "idle"; // idle | none | unsupported | loading | ready | no-token | error
+    this.state = "idle"; // idle | none | unsupported | loading | ready | signed-out | error
     this.showOk = false;
     this.requesting = new Set(); // in flight, so a second click can't send a second request
     this.requestErrors = new Map();
@@ -204,17 +204,16 @@ export default class Greenflagged extends View {
           // Mid-edit: keep the last valid list or tree of this file on this machine, dimmed,
           // with the error over it.
           const last = lastValidProject(this.project, project);
-          if (last && (last.ecosystem.audited ? this.list : this.tree)) {
-            return settle(last.ecosystem.audited ? "error" : "unsupported", staleNote(project.error), true);
-          }
+          const stale = last && staleState(this, last.ecosystem.audited);
+          if (stale) return settle(stale, staleNote(project.error), true);
           if (project.path !== this.project?.path || project.on !== this.project?.on) { this.tree = null; this.treeSource = null; this.expanded = new Set(); }
           this.project = project; this.list = null;
           return settle("error", project.error);
         }
         const changedProject = project.path !== this.project?.path || project.on !== this.project?.on;
         if (changedProject) { this.tree = null; this.treeSource = null; this.expanded = new Set(); }
-        // The tree is built and drawn only for unaudited projects. No request for a
-        // language the registry can't check yet.
+        // The tree is built and drawn for unaudited projects, and for audited ones with no
+        // usable token. No request for a language the registry can't check yet.
         if (!project.ecosystem.audited) {
           this.project = project; this.list = null;
           if (Array.isArray(project.deps)) {
@@ -227,28 +226,35 @@ export default class Greenflagged extends View {
           } else { this.tree = null; this.treeSource = null; }
           return settle("unsupported");
         }
-        this.tree = null; this.treeSource = null;
         // Saving package.json without touching its dependencies costs no request.
         const signature = JSON.stringify([here.on, project.path, project.deps]);
         const cached = force ? null : cachedAudit(this.audits, signature, Date.now());
-        if (cached) { this.project = project; this.list = cached; return settle("ready"); }
+        if (cached) { this.project = project; this.list = cached; this.tree = null; this.treeSource = null; return settle("ready"); }
         this.project = project;
         if (changedProject) { this.list = null; settle("loading"); }
-        if (!project.deps.length) { this.list = []; return settle("ready"); }
+        if (!project.deps.length) { this.list = []; this.tree = null; this.treeSource = null; return settle("ready"); }
         this.token ??= await readToken(here.on);
-        if (!this.token) return settle("no-token");
-        const response = await post(this.token, auditRequest(project.deps));
-        if (response.status === 401 || response.status === 403) {
-          this.token = null;
-          return settle("no-token", "Greenflagged refused the token.");
+        if (run !== this.run) return;
+        const response = this.token ? await post(this.token, auditRequest(project.deps)) : null;
+        if (run !== this.run) return;
+        const outcome = auditOutcome(this.token, response?.status);
+        if (outcome.forget) this.token = null;
+        Object.assign(this, screenAfterOutcome(outcome, this));
+        // Signed out, the panel is still a tree viewer: the plain tree, with a sign-in line.
+        if (outcome.view === "tree") {
+          await this.buildProjectTree(project, here, run, cx);
+          if (run !== this.run) return;
+          return settle("signed-out", outcome.message);
         }
-        if (response.status !== 200) return settle("error", `Greenflagged answered ${response.status}.`);
+        if (outcome.view === "error") return settle("error", outcome.message);
         const list = rows(project.deps, parseToolResponse(await response.text()));
         if (run !== this.run) return;
         storeAudit(this.audits, signature, list, Date.now());
         this.list = list;
+        this.tree = null; this.treeSource = null;
         settle("ready");
       } catch (error) {
+        if (run === this.run) Object.assign(this, screenAfterError(this));
         settle("error", String(error?.message ?? error));
       }
     });
@@ -313,7 +319,7 @@ export default class Greenflagged extends View {
   // watchFolder can't see another machine, so a sign-in is polled for, briefly.
   pollSignIn(cx) {
     if (!this.signInUntil || this.polling) return;
-    if (this.state !== "no-token" || Date.now() >= this.signInUntil) {
+    if (this.state !== "signed-out" || Date.now() >= this.signInUntil) {
       this.signInUntil = null;
       cx.notify();
       return;
@@ -381,43 +387,38 @@ export default class Greenflagged extends View {
       .when(Boolean(failure), (el) => el.child(div().pl(13).text_color(t.ansi1).text_size(11).child(failure)));
   }
 
-  signInScreen(t) {
+  // Signed out, sign-in is one line over the tree rather than a screen in its place.
+  signInLine(t) {
     const link = (id, text, url) => div().id(id).flex_none().cursor_pointer().text_color(t.accent)
       .hover((s) => s.text_color(t.foreground)).on_mouse_down("left", stopPress).on_click(() => { openUrl(url); }).child(text);
-    const action = this.signInUntil
-      ? h_flex().w_full().h(32).gap(8).items_center().justify_center().text_color(t.muted)
+    const line = this.signInUntil
+      ? h_flex().gap(6).items_center().text_size(12).text_color(t.muted)
         .child(div().text_color(t.accent).frames(SPINNER, 90).child(SPINNER[0]))
         .child(div().child("Waiting for you to sign in…"))
-      : h_flex().id("sign-in").w_full().h(32).items_center().justify_center().rounded(6).cursor_pointer().font_semibold()
-        .bg(t.accent).text_color(t.accent_foreground).hover((s) => s.opacity(0.85))
-        .on_mouse_down("left", stopPress).on_click((_e, cx) => this.signIn(cx)).child("Sign in with npm");
-    return v_flex().px(14).py(16).gap(12).text_size(12).text_color(t.muted)
-      .child(v_flex().gap(3)
-        .child(div().text_size(14).font_semibold().text_color(t.foreground).child("Check your dependencies"))
-        .child(div().child("Sign in to see each package's Greenflagged status.")))
-      .when(Boolean(this.message), (el) => el.child(div().text_color(t.ansi1).child(this.message)))
-      .child(action)
-      .child(h_flex().gap(4).justify_center()
-        .child(div().child("New here?"))
-        .child(link("sign-up", "Create a free account", SIGN_UP_URL)))
-      .child(div().h(1).bg(t.border))
-      .child(div().id("other-ways").flex_none().cursor_pointer().text_size(11).hover((s) => s.text_color(t.foreground))
-        .on_mouse_down("left", stopPress).on_click((_e, cx) => { this.showOther = !this.showOther; cx.notify(); })
-        .child(`${this.showOther ? "▾" : "▸"} Other ways to sign in`))
-      .when(Boolean(this.showOther), (el) => el
-        .child(v_flex().gap(4).text_size(11)
+      : h_flex().gap(6).items_center().text_size(12)
+        .child(div().id("sign-in").flex_none().cursor_pointer().text_color(t.accent).hover((s) => s.text_color(t.foreground))
+          .on_mouse_down("left", stopPress).on_click((_e, cx) => this.signIn(cx)).child("Sign in for Greenflagged checks"))
+        .child(div().id("other-ways").flex_none().cursor_pointer().text_color(t.dim).hover((s) => s.text_color(t.foreground))
+          .on_mouse_down("left", stopPress).on_click((_e, cx) => { this.showOther = !this.showOther; cx.notify(); })
+          .child(`· ${this.showOther ? "▾" : "▸"} Other ways`));
+    return v_flex().gap(6).child(line)
+      .when(Boolean(this.showOther), (el) => el.child(v_flex().gap(6).pb(2).text_size(11).text_color(t.muted)
+        .child(v_flex().gap(4)
           .child(div().child("Run this, then click ↻:"))
           .child(div().p(8).rounded(4).bg(t.raised).text_color(t.foreground).font_family("JetBrains Mono").child(SIGN_IN_COMMAND.join(" "))))
-        .child(v_flex().gap(4).text_size(11)
+        .child(v_flex().gap(4)
           .child(div().child("Or export GREENFLAGGED_TOKEN with a token from:"))
-          .child(link("tokens", TOKEN_URL, `https://${TOKEN_URL}`))));
+          .child(link("tokens", TOKEN_URL, `https://${TOKEN_URL}`)))
+        .child(h_flex().gap(4)
+          .child(div().child("New here?"))
+          .child(link("sign-up", "Create a free account", SIGN_UP_URL)))));
   }
 
   body(t, list) {
     const note = (text) => div().p(10).text_color(t.muted).text_size(12).child(text);
     if (this.state === "none") return note("No package.json in this folder or above it.");
     if (this.state === "unsupported") return this.treeBody(t, note);
-    if (this.state === "no-token") return this.signInScreen(t);
+    if (this.state === "signed-out") return this.tree ? this.treeBody(t, note) : note("Checking…");
     if (this.state === "error" && !list) return div().p(10).text_color(t.ansi1).text_size(12).child(this.message);
     if (!list) return note("Checking…");
     if (!list.length) return note("This project has no registry dependencies.");
@@ -478,14 +479,19 @@ export default class Greenflagged extends View {
         .child(count(counts.blocked, this.stale ? t.dim : t.ansi1))
         .child(count(counts.attention, this.stale ? t.dim : t.ansi3))
         .child(count(counts.ok, this.stale ? t.dim : t.ansi2)))
-      .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(count(topLevel(this.tree).count, t.dim)))
+      .when(this.isPlain() && Boolean(this.tree), (el) => el.child(count(topLevel(this.tree).count, t.dim)))
       .child(div().id("rail-label").flex_none().pt(4).cursor_pointer().text_color(t.muted).hover((s) => s.text_color(t.foreground))
         .on_mouse_down("left", stopPress).on_click(() => this.expand(block))
         .child(svg(`mods/${MOD}/label.svg`).w(14).h(83).text_color(t.muted)));
   }
 
+  // The views that draw the plain tree rather than the audit's rows.
+  isPlain() {
+    return this.state === "unsupported" || this.state === "signed-out";
+  }
+
   render(cx) {
-    const t = theme(), here = this.frozen ? null : location();
+    const t = theme(), plain = this.isPlain(), here = this.frozen ? null : location();
     if (here && JSON.stringify(here) !== this.context && !this.isStandingBy()) this.refresh(cx);
     const block = findBlock(layout(), MOD);
     const list = this.list ? withRequests(this.list, shared(REQUESTED) ?? {}) : null;
@@ -517,15 +523,17 @@ export default class Greenflagged extends View {
           .child(pill(counts.blocked, this.stale ? t.dim : t.ansi1, "blocked"))))
         .when(this.state === "unsupported" && Boolean(this.project), (el) => el.child(
           div().text_size(12).text_color(t.muted).child(`${this.project.language ?? this.project.ecosystem.name}: no Greenflagged checks yet`)))
-        .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(
+        .when(this.state === "signed-out", (el) => el.child(this.signInLine(t)))
+        .when(plain && Boolean(this.tree), (el) => el.child(
           div().text_size(12).text_color(t.dim).child(countsLine(this.tree))))
-        .when(this.state === "unsupported" && Boolean(this.message), (el) => el.child(
+        .when(plain && Boolean(this.message), (el) => el.child(
           div().text_size(11).text_color(t.ansi1).child(this.message)))
-        .when(this.state === "unsupported" && Boolean(this.tree?.note), (el) => el.child(
+        .when(plain && Boolean(this.tree?.note), (el) => el.child(
           div().text_size(11).text_color(t.ansi3).child(this.tree.note)))
-        .when(this.state === "unsupported" && Boolean(this.project?.note), (el) => el.child(
+        .when(plain && Boolean(this.project?.note), (el) => el.child(
           div().text_size(11).text_color(t.ansi3).child(this.project.note)))
-        .when(Boolean(this.project?.ecosystem.audited) && this.project.deps?.length > MAX_ENTRIES, (el) => el.child(
+        // The plain tree shows every dependency; only the audit stops at its cap.
+        .when(Boolean(this.project?.ecosystem.audited) && this.state !== "signed-out" && this.project.deps?.length > MAX_ENTRIES, (el) => el.child(
           div().text_size(11).text_color(t.ansi3).child(`Showing the first ${MAX_ENTRIES} dependencies.`)))
         .when(this.project?.skipped?.length > 0, (el) => el.child(
           div().text_size(11).text_color(t.dim).child(`${this.project.skipped.length} local or git dependencies have no registry check.`)))
