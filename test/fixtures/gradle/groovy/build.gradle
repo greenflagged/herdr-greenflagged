@@ -1,0 +1,34 @@
+// A hand-written Groovy build covering what gradle.js reads.
+plugins {
+    id 'java-library'
+    id 'org.jetbrains.kotlin.jvm' version '1.9.24'
+}
+
+ext {
+    okhttpVersion = '4.12.0'
+}
+
+dependencies {
+    implementation 'com.squareup.retrofit2:retrofit:2.11.0'
+    implementation "com.squareup.okhttp3:okhttp:$okhttpVersion"
+    implementation group: 'org.apache.commons', name: 'commons-lang3', version: '3.14.0'
+    implementation group: 'commons-io', name: 'commons-io', version: commonsIoVersion
+    implementation deps.okhttp
+    implementation platform('org.springframework.boot:spring-boot-dependencies:3.3.0')
+    api('com.google.code.gson:gson:2.11.0')
+    compileOnly 'org.projectlombok:lombok:1.18.32', 'org.jetbrains:annotations:24.1.0'
+    annotationProcessor 'org.projectlombok:lombok:1.18.32'
+    implementation project(':lib')
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation kotlin('stdlib')
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+}
+
+sourceSets {
+    jvmTest {
+        dependencies {
+            implementation 'io.kotest:kotest-runner-junit5:5.9.0'
+        }
+    }
+}

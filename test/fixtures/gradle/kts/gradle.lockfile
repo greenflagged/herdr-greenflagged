@@ -1,0 +1,20 @@
+# This is a Gradle generated file for dependency locking.
+# Manual edits can break the build and are not advised.
+# This file is expected to be part of source control.
+app.cash.turbine:turbine:1.1.0=jvmTestCompileClasspath,jvmTestRuntimeClasspath
+ch.qos.logback:logback-classic:1.5.6=jvmCompileClasspath,jvmRuntimeClasspath
+ch.qos.logback:logback-core:1.5.6=jvmRuntimeClasspath
+com.google.guava:guava:33.2.1-jre=jvmCompileClasspath,jvmRuntimeClasspath
+com.squareup.okio:okio:3.9.0=jvmCompileClasspath,jvmRuntimeClasspath
+io.insert-koin:koin-bom:3.5.6=jvmCompileClasspath,jvmRuntimeClasspath
+io.insert-koin:koin-core:3.5.6=jvmCompileClasspath,jvmRuntimeClasspath
+io.ktor:ktor-server-core:2.3.11=jvmCompileClasspath,jvmRuntimeClasspath
+io.ktor:ktor-server-netty:2.3.11=jvmCompileClasspath,jvmRuntimeClasspath
+io.mockk:mockk:1.13.11=jvmTestCompileClasspath,jvmTestRuntimeClasspath
+org.jetbrains.kotlin:kotlin-reflect:1.9.24=jvmCompileClasspath,jvmRuntimeClasspath
+org.jetbrains.kotlin:kotlin-stdlib:1.9.24=jvmCompileClasspath,jvmRuntimeClasspath
+org.jetbrains.kotlin:kotlin-test:1.9.24=jvmTestCompileClasspath,jvmTestRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1=jvmCompileClasspath,jvmRuntimeClasspath
+org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3=jvmCompileClasspath,jvmRuntimeClasspath
+org.slf4j:slf4j-api:2.0.13=jvmRuntimeClasspath
+empty=jvmAnnotationProcessor

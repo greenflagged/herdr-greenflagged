@@ -1,0 +1,19 @@
+[versions]
+kotlin = "1.9.24"
+ktor = "2.3.11"
+coroutines = { strictly = "1.8.1" }
+
+[libraries]
+ktor-server-core = { module = "io.ktor:ktor-server-core", version.ref = "ktor" }
+ktor-server-netty = { module = "io.ktor:ktor-server-netty", version.ref = "ktor" }
+kotlinx_coroutines_core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+logback = "ch.qos.logback:logback-classic:1.5.6"
+koin-bom = { module = "io.insert-koin:koin-bom", version = "3.5.6" }
+koin-core = { module = "io.insert-koin:koin-core" }
+mockk = { module = "io.mockk:mockk", version = { strictly = "1.13.11" } }
+
+[bundles]
+ktor-server = ["ktor-server-core", "ktor_server_netty"]
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

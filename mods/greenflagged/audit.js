@@ -2,6 +2,8 @@
 // can run it under Node without the app.
 
 import { GO_LOCKFILES, GO_NOTE, parseGoMod } from "./go.js";
+import { GRADLE_COMPANIONS, GRADLE_LOCKFILES, GRADLE_NOTE, parseGradleGroovy, parseGradleKts } from "./gradle.js";
+import { MAVEN_NOTE, parsePom } from "./maven.js";
 import { PYTHON_LOCKFILES, PYTHON_NOTE, parsePyproject, parseRequirements } from "./python.js";
 
 export const MCP_URL = "https://greenflagged.dev/mcp";
@@ -41,11 +43,18 @@ const LABELS = {
 // off on the registry, so Python is unaudited for now.
 //
 // An unaudited entry gains a dependency tree by carrying these optional fields,
-// each exported from one module per language (python.js, cargo.js, go.js), so this
-// list stays the only registry:
-//   parse(text)  -> { name, deps: [{ name, constraint, dev, extras?, marker? }], skipped?, undeclared? }
+// each exported from one module per language (python.js, go.js, maven.js, gradle.js),
+// so this list stays the only registry:
+//   parse(text, { files, root, folder })
+//                -> { name, deps: [{ name, constraint, dev, extras?, marker? }], skipped?, undeclared?, language? }
 //                   | { error }; `undeclared: true` means the file has no dependency tables
-//                   at all, and findManifest then tries a later manifest of the same id
+//                   at all, and findManifest then tries a later manifest of the same id.
+//                   `language` names the language when the file says more than the entry
+//                   (Gradle and Maven answer "Kotlin"); it lands on the project, and the
+//                   panel shows it instead of `name`. `files`, `root` and `folder` are
+//                   the companions below; parsers that need none ignore them. A result
+//                   must never carry `root`, `folder`, `path` or `ecosystem`: it is spread
+//                   into the project and would overwrite them.
 //   lockfiles    -> [{ file, resolver(text, project) -> { resolve, count?, direct? } | { error } }], tried
 //                   in order in the manifest's folder; `resolve` is the contract in tree.js, and
 //                   `direct` replaces the manifest's directs when the lock records the project
@@ -53,19 +62,40 @@ const LABELS = {
 //                   A manifest may be its own lockfile (Go lists go.mod), and is then read
 //                   twice. A resolver gets only the lock's text and the project: no file
 //                   reader and no machine, so it can't read further files today.
+//   companions   -> { root: [names], files: [relative paths] }, files the parser needs from
+//                   the build's root folder. From the manifest's folder upward, findManifest
+//                   reads the `root` names in each folder; the first folder holding any of
+//                   them is the build root, and the `files` are read from that one folder.
+//                   The walk visits the manifest's folder and then only ancestors strictly
+//                   below home, so home and `/` are never read for a root marker; with no
+//                   marker anywhere, the manifest's folder is the root. Every name lands in
+//                   `parse`'s `files` (null when missing), and the root becomes
+//                   `project.root`, which the panel watches. A project from an entry
+//                   without companions has `root` equal to `folder`.
 //   note         -> shown instead of the no-lockfile sentence
-// Both Python entries share one base, so their lockfiles and note can't drift apart.
+// Parsers never get a file reader: every file the panel can read is a static name on an
+// entry (`file`, `lockfiles`, `companions`), so the README's list of files read is
+// complete by construction, and a hostile manifest can't widen it.
+// Both Python entries share one base, so their lockfiles and note can't drift apart, and
+// so do the three Java/Kotlin entries.
 const PYTHON = { id: "pypi", name: "Python", audited: false, lockfiles: PYTHON_LOCKFILES, note: PYTHON_NOTE };
+const MAVEN = { id: "maven", name: "Java/Kotlin", audited: false };
+const GRADLE = { ...MAVEN, lockfiles: GRADLE_LOCKFILES, companions: GRADLE_COMPANIONS, note: GRADLE_NOTE };
 export const ECOSYSTEMS = [
   { id: "npm", name: "npm", file: "package.json", audited: true, parse: parsePackageJson },
   { ...PYTHON, file: "pyproject.toml", parse: parsePyproject },
   { ...PYTHON, file: "requirements.txt", parse: parseRequirements },
   { id: "cargo", name: "Rust", file: "Cargo.toml", audited: false },
   { id: "go", name: "Go", file: "go.mod", audited: false, parse: parseGoMod, lockfiles: GO_LOCKFILES, note: GO_NOTE },
+  { ...MAVEN, file: "pom.xml", parse: parsePom, note: MAVEN_NOTE },
+  { ...GRADLE, file: "build.gradle.kts", parse: parseGradleKts },
+  { ...GRADLE, file: "build.gradle", parse: parseGradleGroovy },
 ];
 
-// Files whose change means the panel should look again: manifests and lockfiles.
-export const WATCHED_FILES = [...new Set(ECOSYSTEMS.flatMap((e) => [e.file, ...(e.lockfiles ?? []).map((l) => l.file)]))];
+// Files whose change means the panel should look again: manifests, lockfiles and companions.
+export const WATCHED_FILES = [...new Set(ECOSYSTEMS.flatMap((e) => [
+  e.file, ...(e.lockfiles ?? []).map((l) => l.file), ...(e.companions?.root ?? []), ...(e.companions?.files ?? []),
+]))];
 
 // Folders to try from `cwd` upward, stopping after `home` when it is an ancestor.
 export function parentFolders(cwd, home) {
@@ -91,16 +121,39 @@ export async function findManifest(cwd, home, read) {
       const i = texts.findIndex((text) => text !== null);
       if (i === -1) continue;
       const ecosystem = tier[i], path = `${folder}/${ecosystem.file}`;
-      const project = { folder, path, ecosystem, ...parseSafely(ecosystem, texts[i]) };
+      const { root, files } = await readCompanions(ecosystem.companions, folder, home, read);
+      const project = { folder, path, root, ecosystem, ...parseSafely(ecosystem, texts[i], { files, root, folder }) };
       // A pyproject.toml with no dependency tables declares them elsewhere; a
       // requirements.txt beside it is the next best source, under the pyproject's name.
       const j = project.undeclared ? tier.findIndex((e, k) => k > i && e.id === ecosystem.id && texts[k] !== null) : -1;
       if (j === -1) return project;
-      const fallback = { folder, path: `${folder}/${tier[j].file}`, ecosystem: tier[j], ...parseSafely(tier[j], texts[j]) };
+      const fallback = { folder, path: `${folder}/${tier[j].file}`, root: folder, ecosystem: tier[j], ...parseSafely(tier[j], texts[j], { files: {}, root: folder, folder }) };
       return { ...fallback, name: fallback.name ?? project.name ?? null };
     }
   }
   return null;
+}
+
+// An entry's companions (see ECOSYSTEMS) → { root, files }. Without companions the
+// root is the manifest's folder and nothing is read.
+async function readCompanions(companions, folder, home, read) {
+  if (!companions) return { root: folder, files: {} };
+  const markers = companions.root ?? [], names = companions.files ?? [];
+  const candidates = parentFolders(folder, home).filter((f, i) => i === 0 || (f !== home && f !== "/"));
+  const files = {};
+  let root = folder;
+  for (const candidate of candidates) {
+    const texts = await Promise.all(markers.map((m) => read(`${candidate}/${m}`)));
+    if (texts.some((t) => t !== null)) {
+      root = candidate;
+      markers.forEach((m, k) => { files[m] = texts[k]; });
+      break;
+    }
+  }
+  for (const m of markers) if (!(m in files)) files[m] = null;
+  const texts = await Promise.all(names.map((name) => read(`${root}/${name}`)));
+  names.forEach((name, k) => { files[name] = texts[k]; });
+  return { root, files };
 }
 
 // Returns the last valid project for the same file on the same machine as `failed`, or
@@ -119,10 +172,10 @@ export const staleNote = (error) => `${error} · showing the last valid version`
 // A parser should answer { error } on bad input; one that throws gets the same
 // { error } result, so findManifest still returns the project and its message names
 // the manifest file.
-function parseSafely(ecosystem, text) {
+function parseSafely(ecosystem, text, companions) {
   if (!ecosystem.parse) return {};
   try {
-    return ecosystem.parse(text) ?? {};
+    return ecosystem.parse(text, companions) ?? {};
   } catch (error) {
     return { error: `${ecosystem.file} could not be read: ${String(error?.message ?? error)}` };
   }
