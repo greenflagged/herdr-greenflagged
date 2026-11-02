@@ -43,21 +43,20 @@ Levels and labels come from the audit `status`:
 - It looks for `package.json` in the terminal's folder and upward, stopping at home. It also looks for
   `pyproject.toml`, `requirements.txt` (Python), `Cargo.toml` (Rust) and `go.mod` (Go), which it can't
   audit yet. The nearest folder with any of them wins, and within one folder `package.json` wins.
-  When the winner can't be audited, it sends no request. A Python project shows a plain tree of its
-  dependencies, read from `uv.lock` or `poetry.lock` beside the manifest when there is one. A Go project
-  shows a plain tree read from `go.mod` alone (direct modules, an "indirect" group, `replace` applied;
-  `go.js`'s header lists the edge cases). It also looks for `pom.xml`, then `build.gradle.kts`, then
-  `build.gradle` (Java/Kotlin, after `go.mod`). A Maven project shows its POM's direct dependencies
-  (`maven.js`'s header lists the edge cases) and a sentence saying the full tree needs
-  `mvn dependency:tree`, which the panel doesn't run. A Gradle project shows the dependencies its build
-  file declares, matched as text and never evaluated, with `libs.*` resolved from
+  When the winner can't be audited, it sends no request. A Python or Rust project shows a plain tree of
+  its dependencies, read from `uv.lock`, `poetry.lock` or `Cargo.lock` beside the manifest when there is
+  one. A Go project shows a plain tree read from `go.mod` alone (direct modules, an "indirect" group,
+  `replace` applied; `go.js`'s header lists the edge cases). It also looks for `pom.xml`, then
+  `build.gradle.kts`, then `build.gradle` (Java/Kotlin, after `go.mod`). A Maven project shows its
+  POM's direct dependencies (`maven.js`'s header lists the edge cases) and a sentence saying the full
+  tree needs `mvn dependency:tree`, which the panel doesn't run. A Gradle project shows the dependencies
+  its build file declares, matched as text and never evaluated, with `libs.*` resolved from
   `gradle/libs.versions.toml`, read from the build root: the nearest folder holding
   `settings.gradle.kts` or `settings.gradle`, found from the build file's folder upward, stopping
   before home unless the build file is in home itself. With `gradle.lockfile` beside the build file, the locked versions fill the rows and the other
   locked entries sit under a collapsed "resolved" row; without one, a sentence says the full tree needs
   `gradle dependencies` (`gradle.js`'s header lists the edge cases). The header reads "Not checked:
-  Kotlin" when the build applies a Kotlin plugin, else "Not checked: Java/Kotlin". Rust says
-  "Greenflagged doesn't check Rust dependencies yet." A `pyproject.toml` with no dependency
+  Kotlin" when the build applies a Kotlin plugin, else "Not checked: Java/Kotlin". A `pyproject.toml` with no dependency
   tables at all (`dynamic = ["dependencies"]`) gives way to a `requirements.txt` beside it.
 - It audits on ↻, every 15 minutes, and when a project or its dependencies change, unless that exact
   project and dependency list was audited in the last 5 minutes. Saving with the same dependencies or
@@ -103,7 +102,7 @@ Levels and labels come from the audit `status`:
   tests run the valid cases of `toml-test`, vendored in `test/fixtures/toml-test/`.
 - `tree.js`: pure logic, the plain dependency tree for a language Greenflagged can't check. A language gets one
   by adding `parse` and `lockfiles` to its `ECOSYSTEMS` entry; Python's are the first. Rows are name and
-  version in `muted` with no dots, expanded one level at a time, with an environment marker as a small
+  version in `muted` with no dots, expanded one level at a time, with an environment marker (or Rust's target cfg) as a small
   truncated `muted` tag when the lock has one. A shared package expands under each parent,
   a package already on its own path shows "(cycle)", and "N direct, M total" counts each package once. `dev`
   marks a package reachable only through dev dependencies. A resolver that skips the count walk
@@ -120,6 +119,11 @@ Levels and labels come from the audit `status`:
   copied ten times under new names, 1.18 MB raw and 91 KB stripped) takes 1.25 ms, against 5.0 ms raw.
   At #7's estimated ~1000× for Herdr that is ~0.1 s and ~1.3 s. Its header lists the Python edge
   cases.
+- `cargo.js`: pure logic, Rust's half of the tree: a `Cargo.toml` parser (dependency, build and dev
+  tables, target tables with their cfg as the marker, `package` renames, `workspace = true`, virtual
+  manifests) and `Cargo.lock` read into a package list. A v3 or v4 lock edge names a version only when two
+  versions of that crate are locked, and the project's own lock entry says which one a direct means.
+  Its header lists the Rust edge cases.
 - `go.js`: pure logic, Go's half of the tree: `go.mod` read line by line into direct and indirect
   modules with `replace` applied. It runs nothing (no `go mod graph`) and reads no module cache, so
   modules are leaves. `go.mod` is also its lockfile. A malformed `go.mod` is refused with an error
@@ -160,6 +164,8 @@ Levels and labels come from the audit `status`:
   direct (numpy behind four `python_full_version` markers is four rows).
 - The Python edge cases (markers on merged rows, poetry's double locks, uv workspaces) are listed in
   `python.js`'s header.
+- The Rust edge cases (workspace members with no lock beside them, `workspace = true` outside the
+  workspace root, path dependencies in a virtual workspace's top level) are listed in `cargo.js`'s header.
 - `fetch` in a mod returns `{ status, url, ok, text(), json() }` and no response headers.
 - `audit_manifest` is capped at 500 entries and lists direct dependencies only.
 - npm aliases (`"x": "npm:lodash@^4"`) must be audited under the real package name.
@@ -210,6 +216,9 @@ Levels and labels come from the audit `status`:
   `requires-python >= 3.9`, the panel shows "7 direct, 28 total": `numpy` four times with its marker as
   a tag, both `pytest` rows tagged `dev`, and `httpx` expanding to `h2` with markers. With `uv.lock`
   deleted and ↻ clicked, it shows the no-lockfile note and the three manifest dependencies.
+- In a Rust project with a `Cargo.lock`, the panel shows "N direct, M total", `[dev-dependencies]`
+  tagged `dev` and `[target.'cfg(...)'.dependencies]` with their cfg as a tag. In a virtual workspace the
+  top level is the workspace's crates.
 - Flipping between two projects inside 5 minutes sends one audit for each, not one per switch.
 - `›` gives a rail with the right counts, and `‹` restores the width, including after a restart.
 - `↗` opens a window that survives a restart, on the same project if frozen, and `↙` brings the panel back.

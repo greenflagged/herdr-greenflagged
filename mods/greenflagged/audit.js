@@ -1,6 +1,7 @@
 // Everything here is plain data in and out, with no Herdr imports, so `npm test`
 // can run it under Node without the app.
 
+import { CARGO_LOCKFILES, CARGO_NOTE, parseCargoToml } from "./cargo.js";
 import { GO_LOCKFILES, GO_NOTE, parseGoMod } from "./go.js";
 import { GRADLE_COMPANIONS, GRADLE_LOCKFILES, GRADLE_MODULES, GRADLE_NOTE, parseGradleGroovy, parseGradleKts } from "./gradle.js";
 import { MAVEN_NOTE, parsePom } from "./maven.js";
@@ -94,7 +95,7 @@ export const ECOSYSTEMS = [
   { id: "npm", name: "npm", file: "package.json", audited: true, parse: parsePackageJson },
   { ...PYTHON, file: "pyproject.toml", parse: parsePyproject },
   { ...PYTHON, file: "requirements.txt", parse: parseRequirements },
-  { id: "cargo", name: "Rust", file: "Cargo.toml", audited: false },
+  { id: "cargo", name: "Rust", file: "Cargo.toml", audited: false, parse: parseCargoToml, lockfiles: CARGO_LOCKFILES, note: CARGO_NOTE },
   { id: "go", name: "Go", file: "go.mod", audited: false, parse: parseGoMod, lockfiles: GO_LOCKFILES, note: GO_NOTE },
   { ...MAVEN, file: "pom.xml", parse: parsePom, note: MAVEN_NOTE },
   { ...GRADLE, file: "build.gradle.kts", parse: parseGradleKts },

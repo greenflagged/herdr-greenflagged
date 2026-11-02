@@ -40,7 +40,7 @@ test("findManifest prefers an audited manifest within one folder", async () => {
 
 test("WATCHED_FILES lists every manifest once", () => {
   assert.deepEqual(WATCHED_FILES, [
-    "package.json", "pyproject.toml", "uv.lock", "poetry.lock", "requirements.txt", "Cargo.toml", "go.mod", "pom.xml",
+    "package.json", "pyproject.toml", "uv.lock", "poetry.lock", "requirements.txt", "Cargo.toml", "Cargo.lock", "go.mod", "pom.xml",
     "build.gradle.kts", "gradle.lockfile", "settings.gradle.kts", "settings.gradle", "gradle/libs.versions.toml", "build.gradle",
   ]);
 });

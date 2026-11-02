@@ -1,0 +1,28 @@
+[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+syn = "2"
+tokio = { version = "1", features = ["rt"], optional = true }
+json = { package = "serde_json", version = "1" }
+local-util = { path = "../local-util" }
+from-git = { git = "https://github.com/example/from-git" }
+pinned-path = { path = "../pinned-path", version = "0.3" }
+
+[build-dependencies]
+cc = "1.0"
+
+[dev-dependencies]
+log = "0.4"
+proptest = "1.6"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[features]
+default = []
+async = ["dep:tokio"]
