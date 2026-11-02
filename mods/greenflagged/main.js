@@ -155,6 +155,8 @@ export default class Greenflagged extends View {
         const project = await findManifest(here.cwd, home(), (path) => readTextFile(path, { on: here.on }).catch(() => null));
         if (run !== this.run) return;
         if (!project) { this.project = null; this.list = null; this.watched = null; return settle("none"); }
+        // Watched even when malformed, so fixing the file refreshes the panel.
+        this.watch(project, here.on, cx);
         if (project.error) {
           // Mid-edit: keep the last valid list or tree of this file, with the error over it.
           const last = lastValidProject(this.project, project);
@@ -165,7 +167,6 @@ export default class Greenflagged extends View {
           this.project = project; this.list = null;
           return settle("error", project.error);
         }
-        this.watch(project, here.on, cx);
         const changedProject = project.path !== this.project?.path;
         if (changedProject) { this.tree = null; this.treeSource = null; this.expanded = new Set(); }
         // The tree is built and drawn only for unaudited projects. No request for a

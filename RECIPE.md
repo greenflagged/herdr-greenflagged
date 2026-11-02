@@ -12,10 +12,12 @@ Top to bottom, 320 px wide, on theme `surface`:
   (13 px semibold `foreground`, or "Dependencies" with no project) and a ↻ at the right (12 px `dim`).
 - **Counts**, 12 px: `N ok` in `ansi2`, `N attention` in `ansi3`, `N blocked` in `ansi1`.
 - **Notes**, 11 px, only when they apply: dependencies past the 500 cap, the number of local or git
-  dependencies not checked, and the last error while older results stay on screen. A manifest that
-  fails to parse mid-edit keeps the last valid list or tree of the same file on screen, under its
-  error in `ansi1` with " · showing the last valid version" appended; with no earlier valid read, or
-  after moving to another project, the error shows alone. This is held in memory only.
+  dependencies not checked, and the last error while older results stay on screen. A manifest can
+  fail to parse while you edit it. When that happens, the panel keeps the last valid list or tree of
+  the same file on screen. The error appears above it in `ansi1`, with " · showing the last valid
+  version" appended. If there was no earlier valid read, or you have moved to another project, the
+  error shows alone. This state is held in memory only. The panel watches the folder either way, so
+  saving the fixed file refreshes it.
 - **Rows**, scrolling. Each has a 7 px dot in its level's color, the package name, a `dev` tag for dev
   dependencies and a status label; below that, the constraint and `→ version`; below that, a reason if
   there is one.
@@ -108,7 +110,10 @@ Levels and labels come from the audit `status`:
 - `go.js`: pure logic, Go's half of the tree: `go.mod` read line by line into direct and indirect
   modules with `replace` applied. It runs nothing (no `go mod graph`) and reads no module cache, so
   modules are leaves. `go.mod` is also its lockfile. A malformed `go.mod` is refused with an error
-  naming the line ("go.mod line 7: …"), never read in part. Its header lists the Go edge cases.
+  naming the line ("go.mod line 7: …"), never read in part. "Malformed" is a check on the file's
+  shape only, and it can be wrong both ways: a `go.mod` that passes may be one Go rejects (`exclude
+  a`), and one Go accepts may be refused (`tool v1.0.0` inside a `require` block). Its header lists
+  the Go edge cases and the full definition.
 - `main.js`: the `View`. From `herdr`: `spaces`, `panes`, `focused`, `exec`, `home`, `readTextFile`,
   `watchFolder`, `theme`. It runs `printenv`, `xdg-open` then `open` for links, and
   `npm login` through `run("tab.new", { name, argv, folder })`.

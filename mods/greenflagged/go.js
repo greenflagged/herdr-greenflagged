@@ -31,11 +31,17 @@
 // - `exclude`, `retract`, `go`, `toolchain`, `godebug`, `tool`, `ignore` and unknown
 //   directives are ignored, single-line or in a `( … )` block.
 // - A malformed go.mod is refused, not half-read: the result is { error } naming the
-//   line. Malformed means a block with no `)` by the end of the file; a directive keyword
-//   or a block opener inside a block; a `require` that isn't a path and a version; or a
-//   `replace` with no `=>`, or whose right side is neither a local path alone nor a path
-//   and a version. This is a check on the shape of the file only: a go.mod passing it may
-//   still be one Go rejects.
+//   line. Malformed means any of these:
+//     - a block with no `)` by the end of the file (the error names the line that opened it);
+//     - a directive keyword or a block opener inside a block;
+//     - a `require` that isn't exactly a path and a version;
+//     - a stray `(` or `)` in a `require` or `replace`;
+//     - a `replace` with no `=>`, with more than one `=>`, or with more than two tokens on the left;
+//     - a `replace` whose right side is neither a local path alone nor a path and a version.
+//   This checks the shape of the file only, and it can be wrong both ways. A go.mod that
+//   passes may still be one Go rejects (`exclude a`, with no version). A go.mod Go accepts
+//   may be refused: a block line whose path is a bare directive keyword, such as
+//   `tool v1.0.0` inside `require ( … )`, counts as a directive inside a block.
 // - The indirect row is a group (`group: true` on the direct, see tree.js), keyed so no
 //   module path can collide with it. A hand-written go.mod requiring a module literally
 //   named `indirect` shows two rows: the module, then the group.
