@@ -4,11 +4,11 @@ import {
   closeOverlay, exec, focused, home, layout, openOverlay, panes, props, readTextFile, run, setShared, shared, spaces, theme, watchFolder,
 } from "herdr";
 import {
-  MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditRequest, cachedAudit, findBlock, findManifest, lastValidProject, packageUrl, parseToolResponse, rememberRequest, requestCall, rows,
-  staleNote, storeAudit, summarize, tokenFromNpmrc, withRequests,
+  MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditRequest, cachedAudit, findBlock, findManifest, lastValidProject, packageUrl, parentFolders,
+  parseToolResponse, rememberRequest, requestCall, rows, staleNote, storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
 import { locateCache, openCache, sessionReader } from "./cache.js";
-import { countsLine, directRoots, expandFailedNote, expandNode, treeForProject, visibleRows } from "./tree.js";
+import { countsLine, expandFailedNote, expandNode, topLevel, treeForProject, visibleRows } from "./tree.js";
 
 const RECHECK_MS = 15 * 60 * 1000; // reviews finish on the registry's time, not ours
 const TOKEN_URL = "greenflagged.dev/account/tokens";
@@ -72,6 +72,18 @@ async function openProjectCache(spec, here, memos) {
   const id = `${on ?? ""}\u0000${dir}`;
   if (!memos.has(id)) memos.set(id, sessionReader(read));
   return openCache(spec, dir, read, memos.get(id));
+}
+
+// The names of `dir`'s sub-folders, on the project's machine. `find` lists what it can
+// and exits non-zero when some entry is unreadable, so its lines are kept whatever the
+// exit code; null only when it printed nothing and failed (a missing folder, no `find`).
+// The folder is an argv entry, never part of a shell string.
+async function listFolder(dir, on) {
+  const result = await exec("find", [dir, "-mindepth", "1", "-maxdepth", "1", "-type", "d"], { on }).catch(() => null);
+  if (!result) return null;
+  const lines = String(result.stdout ?? "").split("\n").filter(Boolean);
+  if (result.code !== 0 && !lines.length) return null;
+  return lines.map((line) => line.slice(line.lastIndexOf("/") + 1)).filter(Boolean);
 }
 
 // The browser is on the machine running the window, so this never takes `on`.
@@ -142,11 +154,12 @@ export default class Greenflagged extends View {
     closeOverlay(this.overlay);
   }
 
-  // Each folder change restarts this; `watched` is what ends the old loop.
+  // Each folder change restarts this; `watched` is what ends the old loop. A workspace
+  // member watches its workspace's folder, which holds the lock and the members' manifests.
   watch(project, on, cx) {
     if (on) { this.watched = null; return; } // watchFolder is local only
-    // The build root, when a manifest reads files above its own folder (Gradle).
-    const folder = project.root ?? project.folder;
+    // The workspace root (Rust) or the build root (Gradle), when a manifest reads files above its own folder.
+    const folder = project.workspaceFolder ?? project.root ?? project.folder;
     if (this.watched === folder) return;
     this.watched = folder;
     cx.spawn(async (cx) => {
@@ -174,11 +187,17 @@ export default class Greenflagged extends View {
         cx.notify();
       };
       try {
-        const project = await findManifest(here.cwd, home(), (path) => readTextFile(path, { on: here.on }).catch(() => null));
+        const read = (path) => readTextFile(path, { on: here.on }).catch(() => null);
+        const found = await findManifest(here.cwd, home(), read);
+        if (run !== this.run) return;
+        if (!found) { this.project = null; this.list = null; this.watched = null; return settle("none"); }
+        // An ecosystem with workspaces places the project in its own (cargo.js). A manifest
+        // that doesn't parse is left where it is, and handled as an error below.
+        const io = { read, list: (dir) => listFolder(dir, here.on), parents: (folder) => parentFolders(folder, home()) };
+        const project = !found.error && found.ecosystem.gather ? await found.ecosystem.gather(found, io).catch(() => found) : found;
         if (run !== this.run) return;
         // Record the machine, so the last valid view is never shown for a different machine.
-        if (project) project.on = here.on ?? null;
-        if (!project) { this.project = null; this.list = null; this.watched = null; return settle("none"); }
+        project.on = here.on ?? null;
         // Watched even when malformed, so fixing the file refreshes the panel.
         this.watch(project, here.on, cx);
         if (project.error) {
@@ -239,17 +258,18 @@ export default class Greenflagged extends View {
   async buildProjectTree(project, here, run, cx) {
     let lock = null;
     for (const l of project.ecosystem.lockfiles ?? []) {
-      const text = await readTextFile(`${project.folder}/${l.file}`, { on: here.on }).catch(() => null);
+      const text = await readTextFile(`${project.workspaceFolder ?? project.folder}/${l.file}`, { on: here.on }).catch(() => null);
       if (run !== this.run) return;
       if (text !== null) { lock = { ...l, text }; break; }
     }
     // The 15-minute timer and a save that changes nothing don't rebuild.
-    const source = JSON.stringify([here.on, project.path, project.deps, lock?.file ?? null, lock?.text ?? null]);
+    const source = JSON.stringify([here.on, project.path, project.deps, project.fingerprint ?? null, lock?.file ?? null, lock?.text ?? null]);
     if (source === this.treeSource && this.tree) return;
     const cache = lock?.cache ? await openProjectCache(lock.cache, here, this.cacheMemos) : null;
     if (run !== this.run) return;
     const tree = await treeForProject(project, lock, {
       noLockNote: project.ecosystem.note, expanded: this.expanded, pause: () => cx.sleep(0), stale: () => run !== this.run, cache,
+      unlocked: project.ecosystem.unlocked ?? null,
     });
     if (!tree || run !== this.run) return;
     this.tree = tree;
@@ -438,6 +458,7 @@ export default class Greenflagged extends View {
       .child(div().flex_1().min_w(0).truncate().text_color(node.group || this.stale ? t.dim : t.muted).child(node.name))
       .child(div().flex_none().truncate().max_w(90).text_color(this.stale ? t.dim : t.muted).text_size(11).child(node.version ?? node.constraint ?? ""))
       .when(Boolean(node.marker), (el) => el.child(div().flex_none().truncate().max_w(110).text_color(this.stale ? t.dim : t.muted).text_size(11).child(node.marker)))
+      .when(Boolean(node.kind), (el) => el.child(tag(`(${node.kind})`)))
       .when(node.dev, (el) => el.child(tag("dev")))
       .when(node.cycle, (el) => el.child(tag("(cycle)")))
       .when(Boolean(node.tag), (el) => el.child(tag(node.tag)));
@@ -457,7 +478,7 @@ export default class Greenflagged extends View {
         .child(count(counts.blocked, this.stale ? t.dim : t.ansi1))
         .child(count(counts.attention, this.stale ? t.dim : t.ansi3))
         .child(count(counts.ok, this.stale ? t.dim : t.ansi2)))
-      .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(count(directRoots(this.tree).length, t.dim)))
+      .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(count(topLevel(this.tree).count, t.dim)))
       .child(div().id("rail-label").flex_none().pt(4).cursor_pointer().text_color(t.muted).hover((s) => s.text_color(t.foreground))
         .on_mouse_down("left", stopPress).on_click(() => this.expand(block))
         .child(svg(`mods/${MOD}/label.svg`).w(14).h(83).text_color(t.muted)));
@@ -495,17 +516,19 @@ export default class Greenflagged extends View {
           .child(pill(counts.attention, this.stale ? t.dim : t.ansi3, "attention"))
           .child(pill(counts.blocked, this.stale ? t.dim : t.ansi1, "blocked"))))
         .when(this.state === "unsupported" && Boolean(this.project), (el) => el.child(
-          div().text_size(12).text_color(t.muted).child(`Not checked: ${this.project.language ?? this.project.ecosystem.name}`)))
+          div().text_size(12).text_color(t.muted).child(`${this.project.language ?? this.project.ecosystem.name}: no Greenflagged checks yet`)))
         .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(
           div().text_size(12).text_color(t.dim).child(countsLine(this.tree))))
         .when(this.state === "unsupported" && Boolean(this.message), (el) => el.child(
           div().text_size(11).text_color(t.ansi1).child(this.message)))
         .when(this.state === "unsupported" && Boolean(this.tree?.note), (el) => el.child(
           div().text_size(11).text_color(t.ansi3).child(this.tree.note)))
+        .when(this.state === "unsupported" && Boolean(this.project?.note), (el) => el.child(
+          div().text_size(11).text_color(t.ansi3).child(this.project.note)))
         .when(Boolean(this.project?.ecosystem.audited) && this.project.deps?.length > MAX_ENTRIES, (el) => el.child(
           div().text_size(11).text_color(t.ansi3).child(`Showing the first ${MAX_ENTRIES} dependencies.`)))
         .when(this.project?.skipped?.length > 0, (el) => el.child(
-          div().text_size(11).text_color(t.dim).child(`${this.project.skipped.length} local or git dependencies not checked.`)))
+          div().text_size(11).text_color(t.dim).child(`${this.project.skipped.length} local or git dependencies have no registry check.`)))
         .when(this.state === "error" && Boolean(this.list), (el) => el.child(
           div().text_size(11).text_color(t.ansi1).child(this.message))),
     ).child(this.body(t, list));

@@ -1,0 +1,10 @@
+[package]
+name = "ws-cli"
+version = "0.1.0"
+
+[dependencies]
+anyhow = "1"
+ws-core.workspace = true
+
+[dev-dependencies]
+json.workspace = true

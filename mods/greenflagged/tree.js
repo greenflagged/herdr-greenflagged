@@ -2,14 +2,15 @@
 // check. Plain data in and out, with no Herdr imports and no knowledge of any
 // language, so `npm test` can run it under Node without the app.
 //
-// direct:     [{ name, constraint, dev, version?, extras?, marker?, group? }]   an ecosystem's `parse` output
-// edge:       { name, version?, constraint?, extras?, marker? }         what a resolver hands back as children
+// direct:     [{ name, constraint, dev, version?, extras?, marker?, kind?, group? }]   an ecosystem's `parse` output
+// edge:       { name, version?, constraint?, extras?, marker?, kind?, dev? }   what a resolver hands back as children
 // resolve:    (edge) -> Resolution | null, or a Promise of one
 // Resolution: { version: string | null, children: edge[] } | { version, deferred: true }
-// resolver:   resolve, or { resolve, count?: boolean, direct?: direct[], load?, total?, note? };
-//             `count: false` skips the count walk, and `direct` replaces the manifest's directs
+// resolver:   resolve, or { resolve, count?: boolean, direct?: direct[], self?: key, load?, total?, note? };
+//             `count: false` skips the count walk, `direct` replaces the manifest's directs
 //             when the lockfile knows them better (one row per locked version of a split
-//             dependency, say)
+//             dependency, say), and `self` is the project's own key: a child edge resolving
+//             to it is drawn `(cycle)` and not counted
 // load:       (edge) -> Promise<{ children: edge[], tag?: string }>, the children of a
 //             `deferred` resolution, asked for the first time its row opens
 // total:      the "M total" figure for a resolver that sets `count: false`
@@ -26,7 +27,16 @@
 //
 // `marker` is row metadata, never identity: rows merge on name@version, and a merged
 // row shows the first non-null marker among its edges. Child edges that differ only in
-// marker are one edge, and it keeps the first non-null marker too.
+// marker are one edge, and it keeps the first non-null marker too. `kind` (a tag such as
+// "workspace" or "project") is carried the same way, but it is part of an edge's
+// identity: two child edges differing only in kind are two edges, still one row.
+//
+// A child edge may declare `dev`. A child row whose every edge declares it draws the
+// declaration or reachability-dev, whichever holds: a row declared dev stays tagged
+// whatever else reaches its package, and a row declared runtime under a dev-only parent is
+// dev, because nothing at runtime reaches it. A row reached by an edge without a
+// declaration draws reachability, and roots always draw reachability. The counts use
+// reachability only, so a declared-dev edge is walked by the dev walk.
 //
 // A direct with `group: true` is a heading over its edges, not a package (Go's
 // "indirect" row): resolve answers its children (or the row's own `members` edges, when
@@ -53,7 +63,7 @@ export const groupKey = (name) => `\u0000group:${name}`;
 
 const sortedExtras = (extras) => [...new Set(extras ?? [])].sort();
 const isThenable = (value) => Boolean(value) && typeof value.then === "function";
-const edgeId = (edge) => JSON.stringify([edge.name, edge.version ?? null, sortedExtras(edge.extras), edge.constraint ?? null, edge.group === true]);
+const edgeId = (edge) => JSON.stringify([edge.name, edge.version ?? null, sortedExtras(edge.extras), edge.constraint ?? null, edge.kind ?? null, edge.group === true]);
 // Traversal identity: a package's children can depend on the extras of the edge that reached it.
 const visitId = (key, extras) => `${key}\u0000${extras.join(",")}`;
 const byName = (a, b) => (a.group !== b.group ? (a.group ? 1 : -1)
@@ -65,7 +75,7 @@ const byName = (a, b) => (a.group !== b.group ? (a.group ? 1 : -1)
 function memoize(resolve) {
   const cache = new Map();
   return (edge) => {
-    const id = JSON.stringify([edge.name, edge.version ?? null, sortedExtras(edge.extras), edge.group === true]);
+    const id = JSON.stringify([edge.name, edge.version ?? null, sortedExtras(edge.extras), edge.kind ?? null, edge.group === true]);
     const entry = cache.get(id);
     if (entry) return entry.done ? entry.value : entry.pending;
     let value;
@@ -111,30 +121,42 @@ function group(resolved) {
     let entry = byKey.get(key);
     if (!entry) {
       entry = {
-        name: edge.name, version, constraint: edge.constraint ?? null, marker: edge.marker ?? null, key, group: isGroup, extras: new Set(), edges: new Map(), dev: true,
-        deferred: false,
+        name: edge.name, version, constraint: edge.constraint ?? null, marker: edge.marker ?? null, kind: edge.kind ?? null, key, group: isGroup,
+        extras: new Set(), edges: new Map(), dev: true, declared: true, deferred: false,
       };
       byKey.set(key, entry);
     }
     entry.constraint ??= edge.constraint ?? null;
     entry.marker ??= edge.marker ?? null;
+    entry.kind ??= edge.kind ?? null;
     if (resolution?.deferred === true) entry.deferred = true;
     for (const extra of edge.extras ?? []) entry.extras.add(extra);
     for (const child of resolution?.children ?? []) {
       const id = edgeId(child), seen = entry.edges.get(id);
       if (!seen) entry.edges.set(id, child);
-      else if (seen.marker == null && child.marker != null) entry.edges.set(id, { ...seen, marker: child.marker });
+      else entry.edges.set(id, mergeEdge(seen, child));
     }
     entry.dev = entry.dev && Boolean(edge.dev);
+    entry.declared = entry.declared && typeof edge.dev === "boolean";
   }
   return [...byKey.values()].map((entry) => ({ ...entry, extras: [...entry.extras].sort(), childEdges: [...entry.edges.values()] }));
+}
+
+// A repeated child edge: the first non-null marker, and `dev` declared only when both
+// edges declare it (dev only when both say so).
+function mergeEdge(seen, child) {
+  const merged = { ...seen, marker: seen.marker ?? child.marker };
+  if (merged.marker == null) delete merged.marker;
+  delete merged.dev;
+  if (typeof seen.dev === "boolean" && typeof child.dev === "boolean") merged.dev = seen.dev && child.dev;
+  return merged;
 }
 
 function makeNode(entry, { dev, cycle = false }) {
   const childEdges = cycle ? [] : entry.childEdges;
   const deferred = !cycle && entry.deferred === true;
   return {
-    name: entry.name, version: entry.version, constraint: entry.constraint, marker: entry.marker, dev, key: entry.key, extras: entry.extras, group: entry.group,
+    name: entry.name, version: entry.version, constraint: entry.constraint, marker: entry.marker, kind: entry.kind, dev, key: entry.key, extras: entry.extras, group: entry.group,
     cycle, leaf: cycle || (childEdges.length === 0 && !deferred), loading: false, children: cycle ? [] : null, childEdges, pending: null,
     deferred, tag: null,
   };
@@ -162,7 +184,7 @@ export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, maxVis
   const resolve = memoize(typeof resolver === "function" ? resolver : resolver.resolve);
   const entries = group(await resolveAll(resolve, direct)).sort(byName);
   const load = typeof resolver !== "function" && typeof resolver.load === "function" ? memoizeLoad(resolver.load) : null;
-  const tree = { roots: [], total: null, capped: false, runtime: null, resolve, load, counted };
+  const tree = { roots: [], total: null, capped: false, runtime: null, resolve, load, counted, self: typeof resolver === "function" ? null : resolver.self ?? null };
   if (!counted && Number.isFinite(resolver.total)) tree.total = resolver.total;
   if (counted) {
     const seen = new Set(entries.filter((e) => !e.group).map((e) => e.key)), runtime = new Set(), visited = new Set();
@@ -172,7 +194,8 @@ export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, maxVis
       tree.capped = true;
       return true;
     };
-    const walk = async (starts, onKey) => {
+    // `defer` (walk 1) collects the declared-dev edges for walk 2; `seed` (walk 2) starts with them.
+    const walk = async (starts, onKey, { defer = null, seed = [] } = {}) => {
       const stack = [];
       for (const entry of starts) {
         const id = visitId(entry.key, entry.extras);
@@ -182,14 +205,17 @@ export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, maxVis
         if (!entry.group) onKey(entry.key);
         for (let i = entry.childEdges.length - 1; i >= 0; i--) stack.push(entry.childEdges[i]);
       }
+      for (let i = seed.length - 1; i >= 0; i--) stack.push(seed[i]);
       while (stack.length) {
         if (ceiling()) return;
         const edge = stack.pop();
         pops++;
         if (pause && pops % CHUNK === 0) await pause();
+        if (defer && edge.dev === true) { defer.push(edge); continue; }
         let resolution = resolve(edge);
         if (isThenable(resolution)) resolution = await resolution;
         const key = nodeKey(edge.name, resolution?.version ?? edge.version ?? null);
+        if (key === tree.self) continue;
         const id = visitId(key, sortedExtras(edge.extras));
         if (visited.has(id)) continue;
         if (onKey(key) === false) return;
@@ -198,13 +224,14 @@ export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, maxVis
         for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
       }
     };
-    await walk(entries.filter((e) => !e.dev), (key) => { runtime.add(key); seen.add(key); });
+    const deferred = [];
+    await walk(entries.filter((e) => !e.dev), (key) => { runtime.add(key); seen.add(key); }, { defer: deferred });
     await walk(entries.filter((e) => e.dev), (key) => {
       if (seen.has(key)) return true;
       if (seen.size >= cap) { tree.capped = true; return false; }
       seen.add(key);
       return true;
-    });
+    }, { seed: deferred });
     tree.runtime = runtime;
     tree.total = seen.size;
   }
@@ -240,8 +267,9 @@ export function expandNode(tree, node, keys) {
       }
       const entries = group(await resolveAll(tree.resolve, node.childEdges)).sort(byName);
       node.children = entries.map((entry) => {
-        const cycle = keys.includes(entry.key);
-        return makeNode(entry, { dev: tree.counted ? !tree.runtime.has(entry.key) : false, cycle });
+        const cycle = keys.includes(entry.key) || entry.key === tree.self;
+        const reach = tree.counted ? !tree.runtime.has(entry.key) : false;
+        return makeNode(entry, { dev: entry.declared ? entry.dev || reach : reach, cycle });
       });
       node.loading = false;
       node.pending = null;
@@ -260,7 +288,8 @@ export function expandNode(tree, node, keys) {
 // shortest paths first. It drops paths whose packages are gone (a version change
 // gives a new key) or can no longer expand. A path whose expansion fails is dropped
 // too, so its row draws ▸ and one click retries; the other paths still reopen, and
-// the first error is thrown once they have, with the node that failed as `node`.
+// the first error is thrown once they have. The thrown error is a new Error whose
+// `node` is the row that failed and whose `cause` is the original error.
 export async function expandPaths(tree, expanded) {
   const saved = [...expanded].map((path) => {
     try { return { path, keys: keysOf(path) }; } catch { return { path, keys: null }; }
@@ -303,16 +332,27 @@ export function visibleRows(tree, expanded) {
   return rows;
 }
 
-// "N direct, M total". When a walk is stopped, M is only a lower bound: the packages
-// the walks found before stopping. M can still exceed the cap, because the cap never
-// cuts the runtime walk.
 // The roots that are packages: every root but the group headings.
 export const directRoots = (tree) => tree.roots.filter((node) => !node.group);
 
+// What the top level counts: the directs, or for a tree whose one root is a workspace
+// row, the projects under it.
+export function topLevel(tree) {
+  const [root] = tree.roots;
+  if (tree.roots.length === 1 && root.kind === "workspace") return { count: root.childEdges.length, noun: "projects" };
+  return { count: directRoots(tree).length, noun: "direct" };
+}
+
+// "N direct, M total", or "N projects, M total" for a workspace, whose row isn't a
+// package and isn't in M. When a walk is stopped, M is only a lower bound: the packages
+// the walks found before stopping. M can still exceed the cap, because the cap never
+// cuts the runtime walk.
 export function countsLine(tree) {
-  const direct = `${directRoots(tree).length} direct`;
-  if (tree.total === null) return direct;
-  return `${direct}, ${tree.total}${tree.capped ? "+" : ""} total`;
+  const { count, noun } = topLevel(tree);
+  const top = `${count} ${noun}`;
+  if (tree.total === null) return top;
+  const total = noun === "projects" ? tree.total - 1 : tree.total;
+  return `${top}, ${total}${tree.capped ? "+" : ""} total`;
 }
 
 export const NO_LOCKFILE_NOTE = "No lockfile, so only direct dependencies are shown.";
@@ -331,7 +371,10 @@ export function expandFailedNote(tree, node, error) {
 // `lockFile` set. `lock` is { file, text, resolver } or null when no lockfile was
 // found; a lockfile entry that declares a `cache` (cache.js) gets `cache`, the reader
 // confined to it, as the resolver's third argument (null when no cache was found). The
-// resolver may be async, and its `note` becomes the tree's. If the lockfile or the walk
+// resolver may be async, and its `note` becomes the tree's. With no lock,
+// `unlocked(project)`, when given, may answer a resolver that shapes the tree from the
+// manifests alone; null, or a throw, keeps the plain directs. A tree whose one root is a
+// workspace row opens that row when `expanded` is empty. If the lockfile or the walk
 // fails, the tree keeps only the directs and says why in `note`; this function never
 // sets an error state. Every tree it returns has `lazy` (its resolver loads children on
 // expand) and `cacheBacked` (its lockfile declares a cache, so a forced refresh rebuilds
@@ -339,8 +382,14 @@ export function expandFailedNote(tree, node, error) {
 // the walk ends, it returns null before expandPaths runs, so `expanded` is untouched.
 // A refresh that starts during expandPaths isn't caught: expandPaths still deletes
 // the saved paths that fail or no longer match from `expanded`.
-export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_NOTE, expanded = new Set(), pause, stale = () => false, cache = null } = {}) {
+export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_NOTE, expanded = new Set(), pause, stale = () => false, cache = null, unlocked = null } = {}) {
   let resolver = () => null, made = null, note = lock ? null : noLockNote;
+  if (!lock && typeof unlocked === "function") {
+    try {
+      const shaped = unlocked(project);
+      if (shaped && !shaped.error) { made = shaped; resolver = shaped; }
+    } catch { /* the plain directs */ }
+  }
   if (lock && lock.text.length > MAX_LOCK_CHARS) {
     note = `${lock.file} is too large to parse, so only direct dependencies are shown.`;
   } else if (lock) {
@@ -368,6 +417,7 @@ export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_N
   tree.lockFile = lock?.file ?? null;
   tree.lazy = typeof tree.load === "function";
   tree.cacheBacked = Boolean(lock?.cache);
+  if (!expanded.size && tree.roots.length === 1 && tree.roots[0].kind === "workspace") expanded.add(pathOf([tree.roots[0].key]));
   // A failed re-open is noted like a failed click (main.js), as `expandNote`, so a later
   // successful open clears it. A note the build already set is kept.
   try { await expandPaths(tree, expanded); } catch (error) {

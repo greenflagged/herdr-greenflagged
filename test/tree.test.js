@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CHUNK, MAX_LOCK_CHARS, MAX_TREE_NODES, MAX_WALK_POPS, MAX_WALK_VISITS, NO_LOCKFILE_NOTE, buildTree, countsLine, expandNode, expandPaths,
-  directRoots, expandFailedNote, graphResolver, groupKey, keysOf, mergeDirect, nodeKey, pathOf, treeForProject, visibleRows,
+  directRoots, expandFailedNote, graphResolver, groupKey, keysOf, mergeDirect, nodeKey, pathOf, topLevel, treeForProject, visibleRows,
 } from "../mods/greenflagged/tree.js";
 
 // A resolver over a plain graph: { name: { version, children: [edge] } }.
@@ -724,4 +724,99 @@ test("a plain resolver's tree has no deferred node, no tag and no load", async (
   assert.deepEqual([a.deferred, a.tag, a.leaf], [false, null, false]);
   await expandNode(tree, a, [a.key]);
   assert.deepEqual(a.children.map((n) => [n.name, n.version, n.leaf, n.deferred, n.tag]), [["b", "2", true, false, null]]);
+});
+
+// --- declared dev, self, kind ---------------------------------------------------
+
+each("a child edge's declared dev tags its row, and an undeclared edge draws reachability", async (wrap) => {
+  const graph = { a: { version: null, children: [{ name: "x", dev: true }] }, b: { version: null, children: [{ name: "x" }] }, x: { version: null, children: [] } };
+  const tree = await buildTree([dep("a"), dep("b")], wrap(over(graph)));
+  const a = find(tree.roots, "a"), b = find(tree.roots, "b");
+  await expandNode(tree, a, ["a"]);
+  await expandNode(tree, b, ["b"]);
+  assert.equal(find(a.children, "x").dev, true);
+  assert.equal(find(b.children, "x").dev, false);
+  assert.ok(tree.runtime.has("x"));
+  assert.equal(tree.total, 3);
+});
+
+each("a declared-dev edge is counted by the dev walk", async (wrap) => {
+  const graph = { a: { version: null, children: [{ name: "x", dev: true }] }, x: { version: null, children: [{ name: "y" }] }, y: { version: null, children: [] } };
+  const tree = await buildTree([dep("a")], wrap(over(graph)));
+  assert.equal(tree.runtime.has("x"), false);
+  assert.equal(tree.total, 3);
+  const expanded = new Set();
+  await open(tree, expanded, "a");
+  const x = await open(tree, expanded, "a > x");
+  assert.equal(find(x.children, "y").dev, true);
+});
+
+each("a child declared runtime under a dev-only root is dev", async (wrap) => {
+  const graph = { a: { version: null, children: [{ name: "x", dev: false }] }, x: { version: null, children: [] } };
+  const devTree = await buildTree([dep("a", true)], wrap(over(graph)));
+  assert.equal(devTree.runtime.has("x"), false);
+  await expandNode(devTree, devTree.roots[0], ["a"]);
+  assert.equal(devTree.roots[0].children[0].dev, true);
+  const runtimeTree = await buildTree([dep("a")], wrap(over(graph)));
+  await expandNode(runtimeTree, runtimeTree.roots[0], ["a"]);
+  assert.equal(runtimeTree.roots[0].children[0].dev, false);
+});
+
+each("an edge to the resolver's self is a cycle and isn't counted", async (wrap) => {
+  const graph = { a: { version: null, children: [{ name: "me" }] }, me: { version: null, children: [{ name: "z" }] }, z: { version: null, children: [] } };
+  const tree = await buildTree([dep("a")], { resolve: wrap(over(graph)), self: "me" });
+  assert.equal(tree.total, 1);
+  await expandNode(tree, tree.roots[0], ["a"]);
+  const me = tree.roots[0].children[0];
+  assert.equal(me.cycle, true);
+  assert.equal(me.leaf, true);
+});
+
+each("kind reaches the node, and edges differing only in kind are two edges but one row", async (wrap) => {
+  let calls = 0;
+  const graph = { a: { version: "1", children: [{ name: "p", version: "1", kind: "project" }, { name: "p", version: "1" }] }, p: { version: "1", children: [] } };
+  const resolve = wrap((edge) => { calls++; return over(graph)(edge); });
+  const tree = await buildTree([dep("a", false, { kind: "workspace" })], { resolve, count: false });
+  const [a] = tree.roots;
+  assert.equal(a.kind, "workspace");
+  assert.equal(a.childEdges.length, 2);
+  await expandNode(tree, a, [a.key]);
+  assert.equal(calls, 3); // a, then p once per kind
+  assert.deepEqual(a.children.map((n) => [n.key, n.kind]), [["p@1", "project"]]);
+});
+
+test("topLevel and countsLine count a workspace row's projects", async () => {
+  const graph = { w: { version: null, children: [{ name: "c1" }, { name: "c2" }] }, c1: { version: null, children: [{ name: "d" }] }, c2: { version: null, children: [] }, d: { version: null, children: [] } };
+  const tree = await buildTree([dep("w", false, { kind: "workspace" })], over(graph));
+  assert.deepEqual(topLevel(tree), { count: 2, noun: "projects" });
+  assert.equal(countsLine(tree), "2 projects, 3 total");
+  const plain = await buildTree([dep("c1"), dep("c2")], over(graph));
+  assert.deepEqual(topLevel(plain), { count: 2, noun: "direct" });
+  assert.equal(countsLine(plain), "2 direct, 3 total");
+});
+
+test("treeForProject opens a lone workspace row only when nothing is expanded", async () => {
+  const graph = { w: { version: null, children: [{ name: "c" }] }, c: { version: null, children: [] } };
+  const lock = { file: "x.lock", text: "", resolver: () => ({ resolve: over(graph), direct: [dep("w", false, { kind: "workspace" })] }) };
+  const fresh = new Set();
+  const tree = await treeForProject({ deps: [] }, lock, { expanded: fresh });
+  assert.deepEqual([...fresh], [pathOf(["w"])]);
+  assert.deepEqual(tree.roots[0].children.map((n) => n.name), ["c"]);
+  const kept = new Set([pathOf(["other"])]);
+  const again = await treeForProject({ deps: [] }, lock, { expanded: kept });
+  assert.equal(again.roots[0].children, null);
+});
+
+test("treeForProject without a lockfile takes its shape from unlocked, else the plain directs", async () => {
+  const graph = { a: { version: "1", children: [{ name: "b" }] }, b: { version: null, children: [] } };
+  const project = { deps: [dep("plain")] };
+  const shaped = await treeForProject(project, null, { unlocked: () => ({ resolve: over(graph), direct: [dep("a")] }) });
+  assert.equal(shaped.note, NO_LOCKFILE_NOTE);
+  assert.deepEqual(shaped.roots.map((n) => n.key), ["a@1"]);
+  assert.equal(countsLine(shaped), "1 direct, 2 total");
+  for (const unlocked of [() => null, () => { throw new Error("boom"); }]) {
+    const tree = await treeForProject(project, null, { unlocked });
+    assert.deepEqual(tree.roots.map((n) => n.name), ["plain"]);
+    assert.equal(tree.note, NO_LOCKFILE_NOTE);
+  }
 });
