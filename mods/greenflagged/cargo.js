@@ -153,7 +153,7 @@ const compareVersions = (a, b) => compare(versionParts(a), versionParts(b)) || c
 // is ignored on both sides. As in Cargo, a pre-release version ("2.0.0-alpha") matches
 // only when some part of the requirement names a pre-release of the same major.minor.patch
 // ("^2.0.0-alpha"); pre-releases of one core are ordered by semver's rules, and a
-// pre-release in a requirement needs all three numbers and no wildcard.
+// pre-release in a requirement without all three numbers, or with a wildcard, answers null.
 export function cargoAllows(version, requirement) {
   if (typeof version !== "string" || typeof requirement !== "string") return null;
   const { pre: havePre } = splitVersion(version);
