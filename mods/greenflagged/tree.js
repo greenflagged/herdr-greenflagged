@@ -2,7 +2,7 @@
 // check. Plain data in and out, with no Herdr imports and no knowledge of any
 // language, so `npm test` can run it under Node without the app.
 //
-// direct:     [{ name, constraint, dev, version?, extras?, marker? }]   an ecosystem's `parse` output
+// direct:     [{ name, constraint, dev, version?, extras?, marker?, group? }]   an ecosystem's `parse` output
 // edge:       { name, version?, constraint?, extras?, marker? }         what a resolver hands back as children
 // resolve:    (edge) -> Resolution | null, or a Promise of one
 // Resolution: { version: string | null, children: edge[] }
@@ -13,6 +13,12 @@
 // `marker` is row metadata, never identity: rows merge on name@version, and a merged
 // row shows the first non-null marker among its edges. Child edges that differ only in
 // marker are one edge, and it keeps the first non-null marker too.
+//
+// A direct with `group: true` is a heading over its edges, not a package (Go's
+// "indirect" row): resolve answers its children, and it is keyed by groupKey(name), which
+// no package key can equal. It sorts after the packages, is never `dev`, and isn't
+// counted in "N direct, M total", though the packages under it are. `directRoots` is the
+// one place that leaves groups out of the directs. Only a direct may be a group.
 //
 // A node is built only when its parent is expanded, so a package several others
 // depend on costs nothing until someone opens it under each of them.
@@ -27,13 +33,16 @@ export const pathOf = (keys) => JSON.stringify(keys);
 export const keysOf = (path) => JSON.parse(path);
 
 export const nodeKey = (name, version) => (version ? `${name}@${version}` : name);
+// NUL never appears in a package name; JSON (pathOf) escapes it, so a path stays ASCII.
+export const groupKey = (name) => `\u0000group:${name}`;
 
 const sortedExtras = (extras) => [...new Set(extras ?? [])].sort();
 const isThenable = (value) => Boolean(value) && typeof value.then === "function";
-const edgeId = (edge) => JSON.stringify([edge.name, edge.version ?? null, sortedExtras(edge.extras), edge.constraint ?? null]);
+const edgeId = (edge) => JSON.stringify([edge.name, edge.version ?? null, sortedExtras(edge.extras), edge.constraint ?? null, edge.group === true]);
 // Traversal identity: a package's children can depend on the extras of the edge that reached it.
 const visitId = (key, extras) => `${key}\u0000${extras.join(",")}`;
-const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+const byName = (a, b) => (a.group !== b.group ? (a.group ? 1 : -1)
+  : a.name < b.name ? -1 : a.name > b.name ? 1 : a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 
 // One call per distinct edge. Answers the settled value synchronously when it has
 // one, so the count walk doesn't pay a microtask per edge. A rejection is dropped
@@ -41,7 +50,7 @@ const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.key < b
 function memoize(resolve) {
   const cache = new Map();
   return (edge) => {
-    const id = JSON.stringify([edge.name, edge.version ?? null, sortedExtras(edge.extras)]);
+    const id = JSON.stringify([edge.name, edge.version ?? null, sortedExtras(edge.extras), edge.group === true]);
     const entry = cache.get(id);
     if (entry) return entry.done ? entry.value : entry.pending;
     let value;
@@ -66,10 +75,13 @@ function group(resolved) {
   const byKey = new Map();
   for (const { edge, resolution } of resolved) {
     const version = resolution?.version ?? edge.version ?? null;
-    const key = nodeKey(edge.name, version);
+    const isGroup = edge.group === true;
+    const key = isGroup ? groupKey(edge.name) : nodeKey(edge.name, version);
     let entry = byKey.get(key);
     if (!entry) {
-      entry = { name: edge.name, version, constraint: edge.constraint ?? null, marker: edge.marker ?? null, key, extras: new Set(), edges: new Map(), dev: true };
+      entry = {
+        name: edge.name, version, constraint: edge.constraint ?? null, marker: edge.marker ?? null, key, group: isGroup, extras: new Set(), edges: new Map(), dev: true,
+      };
       byKey.set(key, entry);
     }
     entry.constraint ??= edge.constraint ?? null;
@@ -88,7 +100,7 @@ function group(resolved) {
 function makeNode(entry, { dev, cycle = false }) {
   const childEdges = cycle ? [] : entry.childEdges;
   return {
-    name: entry.name, version: entry.version, constraint: entry.constraint, marker: entry.marker, dev, key: entry.key, extras: entry.extras,
+    name: entry.name, version: entry.version, constraint: entry.constraint, marker: entry.marker, dev, key: entry.key, extras: entry.extras, group: entry.group,
     cycle, leaf: cycle || childEdges.length === 0, loading: false, children: cycle ? [] : null, childEdges, pending: null,
   };
 }
@@ -116,7 +128,7 @@ export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, maxVis
   const entries = group(await resolveAll(resolve, direct)).sort(byName);
   const tree = { roots: [], total: null, capped: false, runtime: null, resolve, counted };
   if (counted) {
-    const seen = new Set(entries.map((e) => e.key)), runtime = new Set(), visited = new Set();
+    const seen = new Set(entries.filter((e) => !e.group).map((e) => e.key)), runtime = new Set(), visited = new Set();
     let pops = 0;
     const ceiling = () => {
       if (visited.size < maxVisits && pops < maxPops) return false;
@@ -130,7 +142,7 @@ export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, maxVis
         if (visited.has(id)) continue;
         if (ceiling()) return;
         visited.add(id);
-        onKey(entry.key);
+        if (!entry.group) onKey(entry.key);
         for (let i = entry.childEdges.length - 1; i >= 0; i--) stack.push(entry.childEdges[i]);
       }
       while (stack.length) {
@@ -159,7 +171,7 @@ export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, maxVis
     tree.runtime = runtime;
     tree.total = seen.size;
   }
-  tree.roots = entries.map((entry) => makeNode(entry, { dev: counted ? !tree.runtime.has(entry.key) : entry.dev }));
+  tree.roots = entries.map((entry) => makeNode(entry, { dev: entry.group ? false : counted ? !tree.runtime.has(entry.key) : entry.dev }));
   return tree;
 }
 
@@ -242,8 +254,11 @@ export function visibleRows(tree, expanded) {
 // "N direct, M total". When a walk is stopped, M is only a lower bound: the packages
 // the walks found before stopping. M can still exceed the cap, because the cap never
 // cuts the runtime walk.
+// The roots that are packages: every root but the group headings.
+export const directRoots = (tree) => tree.roots.filter((node) => !node.group);
+
 export function countsLine(tree) {
-  const direct = `${tree.roots.length} direct`;
+  const direct = `${directRoots(tree).length} direct`;
   if (tree.total === null) return direct;
   return `${direct}, ${tree.total}${tree.capped ? "+" : ""} total`;
 }

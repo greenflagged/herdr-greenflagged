@@ -5,9 +5,10 @@ A [Herdr](https://herdr.dev) panel that follows the terminal you're working in, 
 The problems come first, and the greenflagged packages fold away behind a count.
 
 npm only for now. In a Python project the panel shows a plain tree of its dependencies, read from
-`uv.lock` or `poetry.lock`, with no verdicts, and sends nothing. In a Rust or Go project it says
-Greenflagged doesn't check that language yet. Python verdicts follow once Greenflagged's PyPI audit
-is live.
+`uv.lock` or `poetry.lock`, with no verdicts, and sends nothing. A Go project gets the same plain
+tree, read from `go.mod` alone: its direct modules, then its indirect ones in a group. In a Rust
+project it says Greenflagged doesn't check that language yet. Python verdicts follow once
+Greenflagged's PyPI audit is live.
 
 ## What it looks like
 
@@ -109,6 +110,6 @@ npm test
 ```
 
 `audit.js` holds the logic and imports nothing from Herdr, so the tests run under plain Node. So do
-`tree.js` (the plain dependency tree), `python.js` (Python's manifests and lockfiles) and `toml.js`,
-the TOML reader, whose tests use a vendored copy of the
+`tree.js` (the plain dependency tree), `python.js` (Python's manifests and lockfiles), `go.js`
+(Go's `go.mod`) and `toml.js`, the TOML reader, whose tests use a vendored copy of the
 [toml-test](https://github.com/toml-lang/toml-test) suite in `test/fixtures/toml-test/`.

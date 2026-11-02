@@ -7,7 +7,7 @@ import {
   MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditRequest, cachedAudit, findBlock, findManifest, packageUrl, parseToolResponse, rememberRequest, requestCall, rows,
   storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
-import { countsLine, expandNode, failedNote, treeForProject, visibleRows } from "./tree.js";
+import { countsLine, directRoots, expandNode, failedNote, treeForProject, visibleRows } from "./tree.js";
 
 const RECHECK_MS = 15 * 60 * 1000; // reviews finish on the registry's time, not ours
 const TOKEN_URL = "greenflagged.dev/account/tokens";
@@ -390,7 +390,7 @@ export default class Greenflagged extends View {
       .when(expandable, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover))
         .on_mouse_down("left", stopPress).on_click((_e, cx) => this.toggle(row, cx)))
       .child(div().w(10).flex_none().text_color(t.dim).text_size(11).child(node.loading ? "…" : expandable ? (open ? "▾" : "▸") : ""))
-      .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(node.name))
+      .child(div().flex_1().min_w(0).truncate().text_color(node.group ? t.dim : t.muted).child(node.name))
       .child(div().flex_none().truncate().max_w(90).text_color(t.muted).text_size(11).child(node.version ?? node.constraint ?? ""))
       .when(Boolean(node.marker), (el) => el.child(div().flex_none().truncate().max_w(110).text_color(t.muted).text_size(11).child(node.marker)))
       .when(node.dev, (el) => el.child(tag("dev")))
@@ -411,7 +411,7 @@ export default class Greenflagged extends View {
         .child(count(counts.blocked, t.ansi1))
         .child(count(counts.attention, t.ansi3))
         .child(count(counts.ok, t.ansi2)))
-      .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(count(this.tree.roots.length, t.dim)))
+      .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(count(directRoots(this.tree).length, t.dim)))
       .child(div().id("rail-label").flex_none().pt(4).cursor_pointer().text_color(t.muted).hover((s) => s.text_color(t.foreground))
         .on_mouse_down("left", stopPress).on_click(() => this.expand(block))
         .child(svg(`mods/${MOD}/label.svg`).w(14).h(83).text_color(t.muted)));

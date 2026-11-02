@@ -37,8 +37,9 @@ Levels and labels come from the audit `status`:
   `pyproject.toml`, `requirements.txt` (Python), `Cargo.toml` (Rust) and `go.mod` (Go), which it can't
   audit yet. The nearest folder with any of them wins, and within one folder `package.json` wins.
   When the winner can't be audited, it sends no request. A Python project shows a plain tree of its
-  dependencies, read from `uv.lock` or `poetry.lock` beside the manifest when there is one; Rust and Go
-  say "Greenflagged doesn't check <Language> dependencies yet." A `pyproject.toml` with no dependency
+  dependencies, read from `uv.lock` or `poetry.lock` beside the manifest when there is one. A Go project
+  shows a plain tree read from `go.mod` alone (direct modules, an "indirect" group, `replace` applied;
+  `go.js`'s header lists the edge cases). Rust says "Greenflagged doesn't check Rust dependencies yet." A `pyproject.toml` with no dependency
   tables at all (`dynamic = ["dependencies"]`) gives way to a `requirements.txt` beside it.
 - It audits on ↻, every 15 minutes, and when a project or its dependencies change, unless that exact
   project and dependency list was audited in the last 5 minutes. Saving with the same dependencies or
@@ -101,6 +102,9 @@ Levels and labels come from the audit `status`:
   copied ten times under new names, 1.18 MB raw and 91 KB stripped) takes 1.25 ms, against 5.0 ms raw.
   At #7's estimated ~1000× for Herdr that is ~0.1 s and ~1.3 s. Its header lists the Python edge
   cases.
+- `go.js`: pure logic, Go's half of the tree: `go.mod` read line by line into direct and indirect
+  modules with `replace` applied. It runs nothing (no `go mod graph`) and reads no module cache, so
+  modules are leaves. `go.mod` is also its lockfile. Its header lists the Go edge cases.
 - `main.js`: the `View`. From `herdr`: `spaces`, `panes`, `focused`, `exec`, `home`, `readTextFile`,
   `watchFolder`, `theme`. It runs `printenv`, `xdg-open` then `open` for links, and
   `npm login` through `run("tab.new", { name, argv, folder })`.
@@ -175,5 +179,8 @@ Levels and labels come from the audit `status`:
 - With no token, the panel shows Sign in with npm and sends no request. Finishing the login in the tab it
   opens fills the panel in without clicking ↻.
 - A folder with no `package.json` shows "No package.json in this folder or above it."
-- A Go repo shows "Not checked: Go" in the header and "Greenflagged doesn't check Go dependencies yet." and sends no request. A repo with
-  both `package.json` and `pyproject.toml` still gets the npm audit.
+- A Go repo shows "Not checked: Go" in the header and sends no request. Its tree lists the direct modules
+  from `go.mod` with versions, then a dim `▸ indirect` row that opens to the `// indirect` modules, with
+  no yellow note: `github.com/brizzai/fleet` (11 direct, 28 indirect) reads "11 direct, 39 total", and
+  the rail shows `11`.
+- A repo with both `package.json` and `pyproject.toml` still gets the npm audit.

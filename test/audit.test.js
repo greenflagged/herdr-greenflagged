@@ -24,7 +24,8 @@ test("findManifest takes the nearest folder with a manifest", async () => {
   assert.equal(project.path, "/Users/a/code/svc/go.mod");
   assert.equal(project.ecosystem.name, "Go");
   assert.equal(project.ecosystem.audited, false);
-  assert.equal(project.deps, undefined);
+  assert.equal(project.name, "svc");
+  assert.deepEqual(project.deps, []);
 });
 
 test("findManifest prefers an audited manifest within one folder", async () => {
@@ -49,12 +50,26 @@ test("findManifest names each unaudited language", async () => {
 
 test("findManifest turns a parser that throws into the error state", async () => {
   const go = ECOSYSTEMS.find((e) => e.file === "go.mod");
+  const original = go.parse;
   go.parse = () => { throw new Error("unexpected token"); };
   try {
     const project = await findManifest("/r", "/Users/a", files({ "/r/go.mod": "module x" }));
     assert.equal(project.path, "/r/go.mod");
     assert.equal(project.error, "go.mod could not be read: unexpected token");
-  } finally { delete go.parse; }
+  } finally { go.parse = original; }
+});
+
+test("the Go entry parses, declares go.mod as its own lockfile and carries a note", async () => {
+  const go = ECOSYSTEMS.find((e) => e.file === "go.mod");
+  assert.equal(go.audited, false);
+  assert.deepEqual(go.lockfiles.map((l) => l.file), ["go.mod"]);
+  assert.equal(typeof go.lockfiles[0].resolver, "function");
+  assert.match(go.note, /go\.mod/);
+  const text = "module example.com/svc\n\nrequire (\n\tgithub.com/a/b v1.2.0\n\tgithub.com/c/d v0.1.0 // indirect\n)\n";
+  const project = await findManifest("/r", "/Users/a", files({ "/r/go.mod": text }));
+  assert.equal(project.name, "example.com/svc");
+  assert.deepEqual(project.deps, [{ name: "github.com/a/b", version: "v1.2.0", constraint: "v1.2.0", dev: false }]);
+  assert.deepEqual(project.skipped, []);
 });
 
 test("findManifest stops at home", async () => {

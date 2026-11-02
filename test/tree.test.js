@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CHUNK, MAX_LOCK_CHARS, MAX_TREE_NODES, MAX_WALK_POPS, MAX_WALK_VISITS, NO_LOCKFILE_NOTE, buildTree, countsLine, expandNode, expandPaths,
-  graphResolver, keysOf, mergeDirect, nodeKey, pathOf, treeForProject, visibleRows,
+  directRoots, graphResolver, groupKey, keysOf, mergeDirect, nodeKey, pathOf, treeForProject, visibleRows,
 } from "../mods/greenflagged/tree.js";
 
 // A resolver over a plain graph: { name: { version, children: [edge] } }.
@@ -505,4 +505,53 @@ test("treeForProject builds from a resolver's direct list when it has one", asyn
   assert.deepEqual(plain.roots.map((n) => n.key), ["a"]);
   const bare = await treeForProject(project, { file: "x.lock", text: "", resolver: () => () => ({ version: "3", children: [] }) });
   assert.deepEqual(bare.roots.map((n) => n.key), ["a@3"]);
+});
+
+// --- group directs (Go's "indirect" row) ------------------------------------------
+
+each("a versioned direct whose resolve is null keeps its version as a plain leaf", async (wrap) => {
+  const tree = await buildTree([{ name: "m", version: "v1.2.0", constraint: "v1.0.0", dev: false }], wrap(() => null));
+  const [node] = tree.roots;
+  assert.deepEqual([node.key, node.version, node.constraint, node.leaf], ["m@v1.2.0", "v1.2.0", "v1.0.0", true]);
+  assert.equal(node.marker, null);
+  assert.equal(node.dev, false);
+  assert.equal(node.cycle, false);
+});
+
+const indirectGroup = { name: "indirect", version: null, constraint: null, dev: false, group: true };
+const grouped = (graph) => (edge) => (edge.group === true ? { version: null, children: [{ name: "i1", version: "1" }, { name: "i2", version: "1" }] } : graph[edge.name] ?? null);
+
+each("a group direct is keyed apart, sorts last, isn't counted and never gets dev", async (wrap) => {
+  const tree = await buildTree([indirectGroup, dep("z", true), dep("a", true)], wrap(grouped({})));
+  assert.deepEqual(tree.roots.map((n) => n.key), ["a", "z", groupKey("indirect")]);
+  const group = tree.roots.at(-1);
+  assert.deepEqual([group.group, group.dev, group.leaf], [true, false, false]);
+  assert.deepEqual(directRoots(tree).map((n) => n.name), ["a", "z"]);
+  assert.equal(countsLine(tree), "2 direct, 4 total");
+  await expandNode(tree, group, [group.key]);
+  assert.deepEqual(group.children.map((n) => [n.key, n.dev, n.group]), [["i1@1", false, false], ["i2@1", false, false]]);
+});
+
+each("a group alone is not dev, and its children are counted", async (wrap) => {
+  const tree = await buildTree([indirectGroup], wrap(grouped({})));
+  assert.equal(tree.roots[0].dev, false);
+  assert.equal(countsLine(tree), "0 direct, 2 total");
+});
+
+test("expandPaths reopens a group by its reserved key", async () => {
+  const tree = await buildTree([dep("a"), indirectGroup], grouped({}));
+  const expanded = new Set([pathOf([groupKey("indirect")])]);
+  await expandPaths(tree, expanded);
+  assert.equal(tree.roots.at(-1).children.length, 2);
+  assert.equal(expanded.size, 1);
+  assert.equal(keysOf([...expanded][0])[0], groupKey("indirect"));
+  assert.ok(!/\u0000/.test([...expanded][0]), "a path is plain ASCII");
+});
+
+each("a package named like the group is its own row, even unversioned", async (wrap) => {
+  const tree = await buildTree([indirectGroup, dep("indirect")], wrap(grouped({})));
+  assert.deepEqual(tree.roots.map((n) => [n.key, n.group, n.leaf, n.childEdges.length]), [
+    ["indirect", false, true, 0], [groupKey("indirect"), true, false, 2],
+  ]);
+  assert.equal(countsLine(tree), "1 direct, 3 total");
 });
