@@ -1,0 +1,38 @@
+[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+authors = ["Demo Author <demo@example.com>"]
+description = """
+A demo crate for the TOML reader's tests.
+"""
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "macros"], optional = true }
+log = "0.4"
+
+[dev-dependencies]
+proptest = "1.6"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target."cfg(windows)".dependencies.windows-sys]
+version = "0.59"
+features = ["Win32_Foundation"]
+
+[features]
+default = []
+async = ["dep:tokio"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[workspace]
+members = [
+    "crates/core",
+    "crates/cli",
+]
