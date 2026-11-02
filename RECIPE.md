@@ -1,8 +1,8 @@
 # Greenflagged
 
-A dependency tree viewer for Herdr. It follows the terminal you're working in and shows the project's dependency tree for Python, Rust, Go, Java and Kotlin, read from its manifest and lockfile, without checking it. For npm (JavaScript), Greenflagged's checks are the extra layer: the panel spots rejected and unreviewed dependencies as your agent works and shows what to use instead. [Greenflagged](https://greenflagged.dev) is a private npm registry that scans and reviews every package it serves. It is free for personal use.
+A dependency tree viewer for Herdr. It follows the terminal you're working in and shows the project's dependency tree for npm, Python, Rust, Go, Java and Kotlin, read from its manifest and lockfile. It needs no account. Greenflagged's checks are the extra layer: signed in, an npm (JavaScript) project's rows become verdicts, so the panel spots rejected and unreviewed dependencies as your agent works and shows what to use instead. [Greenflagged](https://greenflagged.dev) is a private npm registry that scans and reviews every package it serves. It is free for personal use.
 
-![Two Greenflagged panels side by side under titles. Left, "Dependency tree: Python · Rust · Go · Java · Kotlin": the Rust crate crab-daemon reading "Rust: no Greenflagged checks yet" and "26 direct, 416 total", with its dependencies as plain rows and the crab-notifier crate expanded. Right, "Checked: npm": link-shortener with 7 ok, 3 attention and 1 blocked; request is rejected, with @cypress/request suggested instead](preview.png)
+![Panel for the Rust workspace crab-trade reading "Rust: no Greenflagged checks yet", "13 projects, 465 total" and "10 local or git dependencies have no registry check", with an open crab-trade (workspace) row over its thirteen crates, each at 0.1.0](preview.png)
 
 ## What you see
 
@@ -47,6 +47,19 @@ the same frame holds a plain tree instead, and no request is sent, with or witho
 - With no tree to draw, the body is one 12 px `muted` line: "Greenflagged doesn't check
   <Language> dependencies yet.", "No dependencies in <file>.", or, for a manifest with no
   dependency tables, "No dependency tables in <file>; dependencies declared elsewhere aren't read."
+
+An npm project with no token, or with one Greenflagged refuses (the `signed-out` state), gets the
+same plain tree and sends no request. The differences:
+
+- **Header**: in place of "no Greenflagged checks yet", a 12 px sign-in line: "Sign in for
+  Greenflagged checks" in `accent`, then "· ▸ Other ways" in `dim`. While a sign-in is awaited
+  the line is a native `.frames` spinner with "Waiting for you to sign in…" in `muted`. Other
+  ways unfolds, in 11 px `muted`, the `npm login` command in a `raised` code block, a link to
+  the tokens page, and "New here? Create a free account".
+- **Rows**: the direct dependencies from `package.json`, with their constraints and `dev` tags.
+  npm has no lockfile reader, so the tree's note reads "Only direct dependencies are shown; npm
+  lockfiles aren't read." A refused token adds "Greenflagged refused the token." in `ansi1`.
+- **Notes**: no 500 cap, which is the audit's; the tree shows every dependency.
 
 ## How it behaves
 
@@ -100,15 +113,14 @@ Levels and labels come from the audit `status`:
   row a red `not on npm`. A failed call shows its error in `ansi1` under the row and can be retried.
 - Clicking any row opens `https://greenflagged.dev/packages/npm/<name>` in the browser; rows highlight with
   `hover`. Clicking Request doesn't open it.
-- With no token, it sends no request and shows a sign-in screen, 14 px side padding: "Check your dependencies"
-  (14 px semibold), one line of `muted` text, a full-width 32 px **Sign in with npm** button (`accent` on
-  `accent_foreground`, centered), and "New here? Create a free account", centered. A 1 px `border` line
-  follows, then a folded "▸ Other ways to sign in" holding the `npm login` command in a `raised` code block and
-  a link to the tokens page. A 401 or 403 adds "Greenflagged refused the token." in `ansi1`.
+- With no token, an npm project sends no request and shows its plain tree with the sign-in line
+  (the `signed-out` state above). A 401 or 403 does the same, adds "Greenflagged refused the token."
+  in `ansi1`, and forgets the token. `auditOutcome` in `audit.js` makes that choice, so it is tested
+  under Node.
 - The account link opens `https://greenflagged.dev/login`, which both signs in and creates accounts.
-- The button opens a tab named "Greenflagged sign in" running that command in the project's folder, and
-  the button becomes a native `.frames` spinner with "Waiting for you to sign in…". It looks for a token every 3 seconds for up to 5 minutes,
-  then audits by itself as soon as one appears.
+- "Sign in for Greenflagged checks" opens a tab named "Greenflagged sign in" running that command in
+  the project's folder, and the line becomes the spinner. It looks for a token every 3 seconds for up
+  to 5 minutes, then audits by itself as soon as one appears, and the tree gives way to the audit.
 - ↻ forgets the token, so a new sign-in takes effect without a restart.
 
 ## Built from
@@ -214,7 +226,7 @@ Levels and labels come from the audit `status`:
 - `older version only` must recommend an exact pin, never `proposed_constraint`: `^1.5.1` allows the newer
   versions that weren't approved, and on public npm those can be the compromised ones.
 - The Request button must call `cx.stop_propagation()`, or its click reaches the row and opens the browser.
-- Poll for a sign-in only after the button is clicked, and never overlap polls. `watchFolder` can't see a
+- Poll for a sign-in only after the sign-in link is clicked, and never overlap polls. `watchFolder` can't see a
   remote machine, and `~/.npmrc` may be on one.
 - Leave `folder` out of `tab.new` while frozen: the current space may be on another machine.
 - Read `overlay` and the window's own props from `props()`. `init`'s first argument doesn't carry them, and
@@ -271,8 +283,11 @@ Levels and labels come from the audit `status`:
 - Requesting a `not imported` package leaves it `requested` after a restart, with no Request button.
 - Clicking a row opens its package page, and clicking Request doesn't.
 - The sign-up link opens the login page.
-- With no token, the panel shows Sign in with npm and sends no request. Finishing the login in the tab it
-  opens fills the panel in without clicking ↻.
+- With no `GREENFLAGGED_TOKEN` and no Greenflagged line in `~/.npmrc` on either machine, an npm
+  project shows its direct dependencies as a plain tree with "Sign in for Greenflagged checks" above
+  it and the npm note, and sends no request (ogres-tabletop on 2026-11-02: "11 direct, 11 total").
+  Clicking the line and finishing the login in the tab it opens switches the panel to the audit
+  without clicking ↻. A refused token shows the same tree with "Greenflagged refused the token."
 - A folder with no `package.json` shows "No package.json in this folder or above it."
 - A Go repo shows "Go: no Greenflagged checks yet" in the header and sends no request. Its tree lists the direct modules
   from `go.mod` with versions, then a dim `▸ indirect` row that opens to the `// indirect` modules, with
