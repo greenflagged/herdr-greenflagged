@@ -36,6 +36,14 @@ const LABELS = {
 // shape below. An unaudited one only names the language, so the panel can say it
 // can't check it rather than that there is nothing to check. PyPI checks are still
 // off on the registry, so Python is unaudited for now.
+//
+// An unaudited entry gains a dependency tree by carrying these optional fields,
+// each exported from one module per language (python.js, cargo.js, go.js), so this
+// list stays the only registry:
+//   parse(text)  -> { name, deps: [{ name, constraint, dev, extras? }], skipped? } | { error }
+//   lockfiles    -> [{ file, resolver(text, project) -> { resolve, count? } | { error } }], tried in order
+//                   in the manifest's folder; `resolve` is the contract in tree.js
+//   note         -> shown instead of the no-lockfile sentence
 export const ECOSYSTEMS = [
   { id: "npm", name: "npm", file: "package.json", audited: true, parse: parsePackageJson },
   { id: "pypi", name: "Python", file: "pyproject.toml", audited: false },
@@ -43,6 +51,9 @@ export const ECOSYSTEMS = [
   { id: "cargo", name: "Rust", file: "Cargo.toml", audited: false },
   { id: "go", name: "Go", file: "go.mod", audited: false },
 ];
+
+// Files whose change means the panel should look again: manifests and lockfiles.
+export const WATCHED_FILES = [...new Set(ECOSYSTEMS.flatMap((e) => [e.file, ...(e.lockfiles ?? []).map((l) => l.file)]))];
 
 // Folders to try from `cwd` upward, stopping after `home` when it is an ancestor.
 export function parentFolders(cwd, home) {
@@ -68,7 +79,7 @@ export async function findManifest(cwd, home, read) {
       const i = texts.findIndex((text) => text !== null);
       if (i === -1) continue;
       const ecosystem = tier[i], path = `${folder}/${ecosystem.file}`;
-      return ecosystem.audited ? { folder, path, ecosystem, ...ecosystem.parse(texts[i]) } : { folder, path, ecosystem };
+      return { folder, path, ecosystem, ...(ecosystem.parse?.(texts[i]) ?? {}) };
     }
   }
   return null;

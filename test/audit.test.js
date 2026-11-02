@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  AUDIT_TTL_MS, MAX_ENTRIES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc,
+  AUDIT_TTL_MS, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc,
 } from "../mods/greenflagged/audit.js";
 
 const toolReply = (result, extra = {}) => JSON.stringify({
@@ -34,6 +34,10 @@ test("findManifest prefers an audited manifest within one folder", async () => {
   assert.equal(project.ecosystem.audited, true);
   assert.equal(project.name, "app");
   assert.deepEqual(project.deps, [{ name: "lodash", constraint: "^4.0.0", dev: false }]);
+});
+
+test("WATCHED_FILES lists every manifest once", () => {
+  assert.deepEqual(WATCHED_FILES, ["package.json", "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod"]);
 });
 
 test("findManifest names each unaudited language", async () => {

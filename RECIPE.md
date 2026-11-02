@@ -80,6 +80,11 @@ Levels and labels come from the audit `status`:
   and redefined tables are errors. Floats and date-times come back as raw strings. A bare value that isn't
   shaped like a boolean, integer, float or date-time is an error; date and time ranges aren't checked. Its
   tests run the valid cases of `toml-test`, vendored in `test/fixtures/toml-test/`.
+- `tree.js`: pure logic, the plain dependency tree for a language Greenflagged can't check. A language gets one
+  by giving its `ECOSYSTEMS` entry a `parse` and `lockfiles` resolvers; none has them yet. Rows are name and
+  version in `muted` with no dots, expanded one level at a time. A shared package expands under each parent,
+  a package already on its own path shows "(cycle)", "N direct, M total" counts each package once, and `dev`
+  marks a package reachable only through dev dependencies.
 - `main.js`: the `View`. From `herdr`: `spaces`, `panes`, `focused`, `exec`, `home`, `readTextFile`,
   `watchFolder`, `theme`. It runs `printenv`, `xdg-open` then `open` for links, and
   `npm login` through `run("tab.new", { name, argv, folder })`.
@@ -146,5 +151,5 @@ Levels and labels come from the audit `status`:
 - With no token, the panel shows Sign in with npm and sends no request. Finishing the login in the tab it
   opens fills the panel in without clicking ↻.
 - A folder with no `package.json` shows "No package.json in this folder or above it."
-- A Go repo shows "Greenflagged doesn't check Go dependencies yet." and sends no request. A repo with
+- A Go repo shows "Not checked: Go" in the header and "Greenflagged doesn't check Go dependencies yet." and sends no request. A repo with
   both `package.json` and `pyproject.toml` still gets the npm audit.
