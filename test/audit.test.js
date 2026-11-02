@@ -542,3 +542,10 @@ test("README and RECIPE name every file the panel reads", () => {
     assert.ok(recipe.includes(`\`${name}\``), `RECIPE.md lacks ${name}`);
   }
 });
+
+test("the Rust entry places a crate in its workspace and shapes a tree without a lock", () => {
+  const cargo = ECOSYSTEMS.find((e) => e.id === "cargo");
+  assert.equal(typeof cargo.gather, "function");
+  assert.equal(typeof cargo.unlocked, "function");
+  assert.equal(ECOSYSTEMS.filter((e) => e.gather || e.unlocked).length, 1);
+});

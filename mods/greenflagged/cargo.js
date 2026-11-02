@@ -12,23 +12,47 @@
 //   records. A `path` or `git` dependency is skipped (not audited) even when it also
 //   gives a version, but when the project's own lock entry lists it, it is still a row,
 //   at the lock's version and with its subtree.
-// - `workspace = true` inherits from `[workspace.dependencies]` in the same file, and
-//   the workspace entry's name wins: like Cargo, a member's own `package` is ignored. A
-//   member's manifest doesn't have that table, so its row shows the constraint
-//   `workspace`, and the version from the lock when there is one.
-// - Without the project's own lock entry (a stale lock, or a manifest with no name), a
-//   twice-locked direct takes the highest locked version its constraint allows.
-// - A virtual manifest (`[workspace]` with no `[package]`) lists its `members` strings
-//   as the top level without a lock. With one, the top level is every lock package
-//   with no `source`: the workspace's crates, plus any path dependency outside it.
-// - A workspace member has no Cargo.lock beside its Cargo.toml (the lock is at the
-//   workspace root), so it shows its directs with the no-lockfile note.
+// - `workspace = true` inherits from `[workspace.dependencies]`: the manifest's own
+//   table when it has one, else the workspace root's. The workspace entry's name wins:
+//   like Cargo, a member's own `package` is ignored. With neither table (a member read
+//   alone), the row shows the constraint `workspace`. `version.workspace = true` takes
+//   `[workspace.package] version` the same way.
+// - Without the crate's own lock entry (a stale lock, or a manifest with no name), a
+//   twice-locked direct takes the highest locked version its constraint allows, and the
+//   crate's path and git dependencies are rows too, at a sibling crate's own version or
+//   as a bare name.
+// - Workspace discovery (`cargoProject`): a manifest with `[workspace]` is its own root;
+//   else `package.workspace = "<path>"` names the root; else the first ancestor
+//   Cargo.toml with `[workspace]` is (over the same ancestors manifest discovery tries).
+//   A crate with no root, one the root `exclude`s, or one the root's `members` don't
+//   match is standalone: its own Cargo.lock beside it, as Cargo treats it.
+// - Members come from the root's `members` globs (workspace.js: `*` and `?` within one
+//   segment, `**` as one level, `[...]` literal) minus `exclude`, at most MAX_MEMBERS.
+//   When a folder can't be listed or the cap is reached, the lock's sourceless packages
+//   fill in the crates the listing missed. `default-members` isn't read.
+// - At the workspace root the tree is one `(workspace)` row whose children are the
+//   crates (the root package too, when there is one). In a member's folder the top level
+//   is that crate's directs, with versions and subtrees from the root's Cargo.lock. Either
+//   way a crate's children are its own manifest's rows, with the dev, build and target
+//   tags it declares; a row naming a sibling crate is a `(project)` row that expands to
+//   that crate's manifest rows. A row the lock entry lists but the manifest didn't name
+//   declares nothing, so it is tagged dev by reachability, like the rows below it. The
+//   crate never appears in its own tree: a back-edge to it reads `(cycle)`.
+// - Without a lock, a workspace or member still shows that shape: crates and sibling
+//   rows at their manifest versions, registry rows as bare names with their constraints.
+// - A `[package]` with no version shows `0.0.0`, which is what Cargo records for it.
+// - A member outside the root folder (`../tools/x`) is read but not watched: saving its
+//   Cargo.toml shows on the next refresh.
+// - A lock item names a crate by name and version only, so two entries with the same
+//   name and version from different sources (a git fork pinned to the registry's
+//   version) both resolve to the first.
 // - Features aren't read: Cargo.lock lists optional dependencies whatever features
 //   are on, so an `optional = true` crate is a normal row. `[patch]` and `[replace]`
 //   aren't applied.
 
 import { parseToml } from "./toml.js";
-import { graphResolver } from "./tree.js";
+import { graphResolver, nodeKey } from "./tree.js";
+import { MAX_MEMBERS, collapse, expandMembers } from "./workspace.js";
 
 const isTable = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const strings = (value) => (Array.isArray(value) ? value.filter((v) => typeof v === "string") : []);
@@ -58,24 +82,44 @@ function cargoSpec(key, spec, dev, marker, inherited) {
   return { dep: direct(name, typeof table.version === "string" ? table.version : "*", dev, marker) };
 }
 
-// Cargo.toml → { name, deps, skipped, local }, or for a virtual manifest
-// { name: null, deps: [member rows], skipped: [], workspace: true }. `local` holds a
-// row per skipped path or git dependency, so the lock can still show it.
-export function parseCargoToml(text) {
+// A manifest's `[workspace]` table as plain data, or null when it has none.
+function workspaceRecord(workspace) {
+  if (!workspace) return null;
+  return {
+    members: [...new Set(strings(workspace.members))],
+    exclude: [...new Set(strings(workspace.exclude))],
+    dependencies: isTable(workspace.dependencies) ? workspace.dependencies : null,
+    package: isTable(workspace.package) ? workspace.package : null,
+  };
+}
+
+// Cargo.toml → { name, version, deps, skipped, local, root, workspace? }. `local` holds a
+// row per skipped path or git dependency, so the lock can still show it. `root` is
+// `package.workspace` (the path to the workspace root) or null, and `workspace` is the
+// manifest's own [workspace] record when it has one. `inherited` is the workspace root's
+// record, for a member read with its root: its `dependencies` serve `workspace = true`
+// and its `package.version` serves `version.workspace = true` when the manifest has no
+// table of its own. A virtual manifest answers its `members` strings as plain rows (what
+// the panel shows when neither the members nor a lock can be read), with
+// `virtual: true` and `layout: "workspace"`.
+export function parseCargoToml(text, inherited = null) {
   const parsed = parseToml(text);
   if (parsed.error) return { error: parsed.line ? `Cargo.toml ${parsed.error}` : `Cargo.toml: ${parsed.error}` };
   const doc = parsed.value;
-  const pkg = isTable(doc.package) ? doc.package : null, workspace = isTable(doc.workspace) ? doc.workspace : null;
+  const pkg = isTable(doc.package) ? doc.package : null;
+  const workspace = workspaceRecord(isTable(doc.workspace) ? doc.workspace : null);
   if (!pkg && workspace) {
-    const members = [...new Set(strings(workspace.members))];
-    return { name: null, deps: members.map((m) => direct(m, null, false)), skipped: [], workspace: true };
+    return {
+      name: null, version: null, deps: workspace.members.map((m) => direct(m, null, false)), skipped: [], local: [],
+      workspace, virtual: true, layout: "workspace",
+    };
   }
-  const inherited = workspace && isTable(workspace.dependencies) ? workspace.dependencies : null;
+  const table = workspace?.dependencies ?? (isTable(inherited?.dependencies) ? inherited.dependencies : null);
   const deps = new Map(), skipped = [], local = [], seen = new Set();
-  const read = (table, dev, marker) => {
-    if (!isTable(table)) return;
-    for (const [key, spec] of Object.entries(table)) {
-      const result = cargoSpec(key, spec, dev, marker, inherited);
+  const read = (section, dev, marker) => {
+    if (!isTable(section)) return;
+    for (const [key, spec] of Object.entries(section)) {
+      const result = cargoSpec(key, spec, dev, marker, table);
       if (!result) continue;
       const name = result.skip ?? result.dep.name;
       if (seen.has(name)) continue;
@@ -92,7 +136,26 @@ export function parseCargoToml(text) {
       if (isTable(target)) for (const [key, dev] of TABLES) read(target[key], dev, cfg);
     }
   }
-  return { name: typeof pkg?.name === "string" ? pkg.name : null, deps: [...deps.values()], skipped, local };
+  return {
+    name: typeof pkg?.name === "string" ? pkg.name : null,
+    version: packageVersion(pkg, workspace, inherited),
+    deps: [...deps.values()], skipped, local,
+    root: typeof pkg?.workspace === "string" ? pkg.workspace : null,
+    ...(workspace ? { workspace } : {}),
+  };
+}
+
+// `package.version`, or for `version.workspace = true` the workspace's
+// `[workspace.package] version`: the manifest's own, else the root's. Null otherwise.
+function packageVersion(pkg, workspace, inherited) {
+  const version = pkg?.version;
+  if (typeof version === "string") return version;
+  if (!isTable(version) || version.workspace !== true) return null;
+  for (const record of [workspace, inherited]) {
+    const value = isTable(record?.package) ? record.package.version : undefined;
+    if (typeof value === "string") return value;
+  }
+  return null;
 }
 
 // One item of a lock entry's `dependencies`: "name", "name version" (when several
@@ -207,54 +270,191 @@ function allowedVersion(versions, constraint) {
   return allowed.sort((a, b) => compareVersions(b, a))[0];
 }
 
-// Cargo.lock → { resolve, direct? }. For a package manifest, the project's own lock
-// entry (sourceless, same name) says which version of a twice-locked crate it uses,
-// so the manifest's directs take that version, and the path and git dependencies it
-// lists are added as rows. Without that entry, a twice-locked direct takes the highest
-// version its constraint allows. For a virtual manifest, the directs are the lock's
-// sourceless packages: the workspace's crates.
+// Cargo.lock → { resolve, direct, self } (see shapeResolver), or { error }.
 export function cargoResolver(text, project) {
   if (typeof text !== "string") return { error: "the lockfile is not text" };
   const parsed = parseToml(text);
   if (parsed.error) return { error: parsed.error };
   const packages = cargoPackages(parsed.value);
   if (!packages.length) return { error: NO_PACKAGES };
-  const { resolve } = graphResolver(packages);
-  const locals = packages.filter((p) => p.source === null);
-  if (project?.workspace) {
-    if (!locals.length) return { resolve };
-    return { resolve, direct: locals.map((p) => ({ name: p.name, version: p.version, constraint: null, dev: false })) };
+  return shapeResolver(packages, project);
+}
+
+// The tree's shape without a lock, for a workspace or member that `cargoProject`
+// gathered crates for: the same rows at manifest versions, registry rows as leaves.
+// Null otherwise (a standalone crate, or a workspace whose members couldn't be read),
+// so the tree is the plain directs.
+export const cargoUnlocked = (project) => (project?.layout && project.crates?.length ? shapeResolver([], project) : null);
+
+const list = (value) => (Array.isArray(value) ? value : []);
+
+// The resolver for a project over a lock's packages (none without a lock). `crates` and
+// `layout` come from `cargoProject`; a project without them is a single crate.
+// - A crate's rows are its manifest's directs. Its own lock entry (sourceless, same name)
+//   says which version of a twice-locked crate it uses, and the path and git
+//   dependencies it lists are rows at the lock's version; a crate the entry lists that
+//   the manifest didn't name is a row with no `dev` of its own. Without an entry, a
+//   twice-locked direct takes the highest version its constraint allows, and the path
+//   and git dependencies are appended as they are.
+// - A row naming a workspace crate (at its version, or with none) is `kind: "project"`
+//   and expands to that crate's rows; anything else resolves through the lock.
+// - `direct` is one `kind: "workspace"` row for the workspace layout, whose children are
+//   the crates; otherwise the project's own rows. `self` is the project's own key, so a
+//   back-edge to it is a cycle, not a row.
+function shapeResolver(packages, project) {
+  const { resolve: lockResolve } = graphResolver(packages);
+  const locked = new Map(), sourceless = new Map();
+  for (const p of packages) {
+    locked.set(p.name, [...(locked.get(p.name) ?? []), p.version]);
+    if (p.source === null && !sourceless.has(p.name)) sourceless.set(p.name, p);
   }
-  const locked = new Map();
-  for (const p of packages) locked.set(p.name, [...(locked.get(p.name) ?? []), p.version]);
-  const deps = Array.isArray(project?.deps) ? project.deps : [];
-  const root = typeof project?.name === "string" ? locals.find((p) => p.name === project.name) : undefined;
-  if (!root) {
-    return {
-      resolve,
-      direct: deps.map((dep) => {
+  const crates = list(project?.crates).filter((c) => typeof c?.name === "string");
+  const byName = new Map();
+  for (const crate of crates) if (!byName.has(crate.name)) byName.set(crate.name, crate);
+  const entryOf = (crate) => (typeof crate.name === "string" ? sourceless.get(crate.name) : undefined);
+  // Cargo's own default for a [package] with no version, and what it writes in the lock.
+  const versionOf = (crate) => entryOf(crate)?.version ?? crate.version ?? "0.0.0";
+  const isProject = (edge) => {
+    const crate = byName.get(edge.name);
+    return Boolean(crate) && (!edge.version || edge.version === versionOf(crate));
+  };
+  const tagProject = (row) => (isProject(row) ? { ...row, kind: "project", version: row.version ?? versionOf(byName.get(row.name)) } : row);
+
+  const rowsOf = (crate) => {
+    const deps = list(crate.deps), local = list(crate.local), entry = entryOf(crate);
+    const listed = new Set(deps.map((dep) => dep.name));
+    let rows;
+    if (entry) {
+      const versions = new Map(entry.dependencies.filter((e) => e.version).map((e) => [e.name, e.version]));
+      rows = deps.map((dep) => (versions.has(dep.name) ? { ...dep, version: versions.get(dep.name) } : dep));
+      const byLocal = new Map(local.map((dep) => [dep.name, dep]));
+      for (const edge of entry.dependencies) {
+        if (listed.has(edge.name)) continue;
+        listed.add(edge.name);
+        const all = locked.get(edge.name) ?? [];
+        const version = edge.version ?? (all.length === 1 ? all[0] : undefined);
+        // A lock-only crate the manifest didn't name in a form read here declares nothing.
+        const row = byLocal.get(edge.name) ?? { name: edge.name, constraint: null };
+        rows.push(version ? { ...row, version } : row);
+      }
+    } else {
+      rows = deps.map((dep) => {
         const versions = locked.get(dep.name) ?? [];
         const version = versions.length > 1 ? allowedVersion(versions, dep.constraint) : undefined;
         return version ? { ...dep, version } : dep;
-      }),
+      });
+      for (const dep of local) {
+        if (listed.has(dep.name)) continue;
+        listed.add(dep.name);
+        rows.push(dep);
+      }
+    }
+    return rows.map(tagProject);
+  };
+
+  const crateEdges = crates.map((crate) => ({ name: crate.name, version: versionOf(crate), constraint: null, dev: false }));
+  if (!crates.length || project?.membersIncomplete) {
+    // The lock's own member list fills in whatever the folder listing missed.
+    for (const p of sourceless.values()) {
+      if (!byName.has(p.name)) crateEdges.push({ name: p.name, version: p.version, constraint: null, dev: false });
+    }
+  }
+
+  const resolve = (edge) => {
+    if (edge.kind === "workspace") return { version: null, children: crateEdges };
+    if (isProject(edge)) {
+      const crate = byName.get(edge.name);
+      return { version: versionOf(crate), children: rowsOf(crate) };
+    }
+    const resolution = lockResolve(edge);
+    return resolution?.children ? { ...resolution, children: resolution.children.map(tagProject) } : resolution;
+  };
+
+  if (project?.layout === "workspace") {
+    return { resolve, direct: [{ name: project.name ?? "workspace", constraint: null, dev: false, kind: "workspace" }] };
+  }
+  const own = { name: project?.name, version: project?.version ?? null, deps: project?.deps, local: project?.local };
+  return { resolve, direct: rowsOf(own), self: typeof own.name === "string" ? nodeKey(own.name, versionOf(own)) : null };
+}
+
+// --- workspace discovery ---------------------------------------------------------
+
+const parentOf = (folder) => folder.slice(0, folder.lastIndexOf("/")) || "/";
+const basename = (folder) => folder.slice(folder.lastIndexOf("/") + 1) || folder;
+const under = (folder, base) => folder === base || folder.startsWith(base === "/" ? "/" : `${base}/`);
+
+// `read` and `list` from main.js, wrapped so neither throwing nor rejecting reaches here.
+const readSafely = (io, path) => {
+  try { return Promise.resolve(io.read(path)).then((t) => (typeof t === "string" ? t : null), () => null); } catch { return Promise.resolve(null); }
+};
+const parseSafely = (text, inherited) => {
+  if (text === null) return null;
+  try { return parseCargoToml(text, inherited); } catch { return null; }
+};
+
+// The Rust project as `findManifest` found it, placed in its workspace. `io` is
+// { read(path) -> text | null, list(dir) -> folder names | null, parents(folder) ->
+// folders to try upward }. Answers the project unchanged for a standalone crate (see the
+// header for when a crate is standalone), else the project with:
+//   workspaceFolder  the root's folder: where the lock is read and watched
+//   crates           [{ name, version, folder, path, deps, skipped, local }], one per
+//                    member manifest read (the root package too), parsed with the root's
+//                    [workspace] as `inherited`
+//   layout           "workspace" at the root, "crate" in a member's folder
+//   fingerprint      what in the member manifests changes the tree
+//   membersIncomplete, note   when the folders couldn't all be listed, or MAX_MEMBERS cut them
+// Never rejects: anything that goes wrong answers the project unchanged.
+export async function cargoProject(project, io) {
+  try {
+    if (!project || project.error || typeof project.folder !== "string") return project;
+    let root = null;
+    if (project.workspace) root = { folder: project.folder, manifest: project };
+    else {
+      const candidates = typeof project.root === "string"
+        ? [collapse(project.folder, project.root)]
+        : project.folder === "/" ? [] : list(io.parents(parentOf(project.folder)));
+      const manifests = await Promise.all(candidates.map(async (folder) => ({ folder, manifest: parseSafely(await readSafely(io, `${folder}/Cargo.toml`), null) })));
+      root = manifests.find((m) => m.manifest?.workspace) ?? null;
+    }
+    if (!root) return project;
+    const { members, exclude } = root.manifest.workspace;
+    // Cargo treats a crate its root excludes as its own root.
+    if (project.folder !== root.folder && exclude.some((e) => under(project.folder, collapse(root.folder, e)))) return project;
+    const expanded = await expandMembers(root.folder, members, exclude, io.list);
+    const folders = [...new Set([...(root.manifest.virtual ? [] : [root.folder]), ...expanded.folders])];
+    // Cargo refuses to build a crate its root's members don't name; its own lock is the best guess.
+    if (project.folder !== root.folder && !folders.includes(project.folder)) return project;
+    const inherited = root.manifest.workspace;
+    const parsed = await Promise.all(folders.map(async (folder) => {
+      const path = `${folder}/Cargo.toml`;
+      return { folder, path, manifest: parseSafely(await readSafely(io, path), inherited) };
+    }));
+    const crates = parsed.filter((c) => typeof c.manifest?.name === "string").map(({ folder, path, manifest }) => ({
+      name: manifest.name, version: manifest.version, folder, path, deps: manifest.deps, skipped: manifest.skipped, local: manifest.local,
+    }));
+    const gathered = {
+      workspaceFolder: root.folder,
+      crates,
+      fingerprint: crates.map((c) => [c.path, c.version, c.deps, c.local]),
+      membersIncomplete: expanded.unlisted || expanded.capped,
+      note: expanded.capped ? `Showing the first ${MAX_MEMBERS} workspace members.` : null,
     };
+    if (project.folder === root.folder) {
+      return {
+        ...project, ...gathered, layout: "workspace", name: project.name ?? basename(root.folder),
+        skipped: [...new Set(crates.flatMap((c) => c.skipped))],
+      };
+    }
+    const own = crates.find((c) => c.folder === project.folder);
+    return {
+      ...project, ...gathered, layout: "crate",
+      ...(own ? { name: own.name, version: own.version, deps: own.deps, skipped: own.skipped, local: own.local } : {}),
+    };
+  } catch {
+    return project;
   }
-  const versions = new Map(root.dependencies.filter((e) => e.version).map((e) => [e.name, e.version]));
-  const rows = deps.map((dep) => (versions.has(dep.name) ? { ...dep, version: versions.get(dep.name) } : dep));
-  const listed = new Set(deps.map((dep) => dep.name));
-  const local = new Map((Array.isArray(project?.local) ? project.local : []).map((dep) => [dep.name, dep]));
-  for (const edge of root.dependencies) {
-    if (listed.has(edge.name)) continue;
-    listed.add(edge.name);
-    const all = locked.get(edge.name) ?? [];
-    const version = edge.version ?? (all.length === 1 ? all[0] : undefined);
-    // A lock-only crate the manifest didn't name in a form read here is a plain row.
-    const row = local.get(edge.name) ?? direct(edge.name, null, false);
-    rows.push(version ? { ...row, version } : row);
-  }
-  return { resolve, direct: rows };
 }
 
 export const CARGO_LOCKFILES = [{ file: "Cargo.lock", resolver: cargoResolver }];
 
-export const CARGO_NOTE = "No Cargo.lock beside the manifest, so only direct dependencies are shown.";
+export const CARGO_NOTE = "No Cargo.lock, so only direct dependencies are shown.";

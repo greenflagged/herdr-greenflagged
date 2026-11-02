@@ -15,10 +15,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0000000000000000000000000000000000000000000000000000000000000002"
 
 [[package]]
+name = "serde_json"
+version = "1.0.140"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0000000000000000000000000000000000000000000000000000000000000003"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "ws-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde_json",
  "ws-core",
 ]
 
@@ -27,4 +37,5 @@ name = "ws-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "ws-cli",
 ]

@@ -1,20 +1,59 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { findManifest } from "../mods/greenflagged/audit.js";
+import { findManifest, parentFolders } from "../mods/greenflagged/audit.js";
 import {
-  CARGO_LOCKFILES, CARGO_NOTE, cargoAllows, cargoPackages, cargoResolver, parseCargoToml, parseLockDependency,
+  CARGO_LOCKFILES, CARGO_NOTE, cargoAllows, cargoPackages, cargoProject, cargoResolver, cargoUnlocked, parseCargoToml, parseLockDependency,
 } from "../mods/greenflagged/cargo.js";
 import { parseToml } from "../mods/greenflagged/toml.js";
-import { countsLine, expandNode, treeForProject } from "../mods/greenflagged/tree.js";
+import { countsLine, expandNode, pathOf, treeForProject } from "../mods/greenflagged/tree.js";
+import { MAX_MEMBERS } from "../mods/greenflagged/workspace.js";
 
 const fixtures = fileURLToPath(new URL("./fixtures/rust/", import.meta.url));
 const read = (...parts) => readFileSync(join(fixtures, ...parts), "utf8");
 const summary = (nodes) => nodes.map((n) => [n.name, n.version, n.marker, n.dev]);
 const find = (nodes, name, version) => nodes.find((n) => n.name === name && (!version || n.version === version));
 const lock = (text) => ({ file: "Cargo.lock", text, resolver: CARGO_LOCKFILES.find((l) => l.file === "Cargo.lock").resolver });
+
+// The workspace fixture through the same steps as the panel: findManifest, then cargoProject.
+const home = join(fixtures, "..");
+const workspaceFolder = join(fixtures, "workspace");
+const fsIo = {
+  read: (path) => { try { return readFileSync(path, "utf8"); } catch { return null; } },
+  list: (dir) => { try { return readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name); } catch { return null; } },
+  parents: (folder) => parentFolders(folder, home),
+};
+const gather = async (folder, io = fsIo, top = home) => cargoProject(await findManifest(folder, top, io.read), io);
+const shape = (nodes) => nodes.map((n) => [n.name, n.version, n.kind, n.dev, n.cycle]);
+const workspaceLock = () => read("workspace", "Cargo.lock");
+// The fixture lock without one crate's [[package]] entry, or with extra entries.
+const withoutEntry = (text, name) => text.split("\n[[package]]").filter((part) => !part.startsWith(`\nname = "${name}"`)).join("\n[[package]]");
+const openAt = async (tree, nodes, keys) => {
+  let node;
+  for (let i = 0; i < keys.length; i++) {
+    node = nodes.find((n) => n.key === keys[i]);
+    await expandNode(tree, node, keys.slice(0, i + 1));
+    nodes = node.children;
+  }
+  return node;
+};
+
+// An in-memory folder tree: `files` maps absolute paths to text.
+const memoryIo = (files, { list } = {}) => ({
+  read: async (path) => files[path] ?? null,
+  list: list ?? (async (dir) => {
+    const names = new Set();
+    for (const path of Object.keys(files)) {
+      if (!path.startsWith(`${dir}/`)) continue;
+      const rest = path.slice(dir.length + 1);
+      if (rest.includes("/")) names.add(rest.split("/")[0]);
+    }
+    return [...names];
+  }),
+  parents: (folder) => parentFolders(folder, "/home"),
+});
 
 const singleProject = () => parseCargoToml(read("single", "Cargo.toml"));
 const singleTree = (project = singleProject(), text = read("single", "Cargo.lock")) =>
@@ -142,17 +181,52 @@ test("parseCargoToml shows workspace = true as the constraint workspace in a mem
   assert.deepEqual(deps, [{ name: "serde", constraint: "workspace", dev: false }]);
 });
 
-test("parseCargoToml lists a virtual manifest's members", () => {
-  assert.deepEqual(parseCargoToml(read("workspace", "Cargo.toml")), {
-    name: null,
-    deps: [{ name: "crates/core", constraint: null, dev: false }, { name: "crates/cli", constraint: null, dev: false }],
-    skipped: [],
-    workspace: true,
+test("parseCargoToml lists a virtual manifest's members and its [workspace] record", () => {
+  const project = parseCargoToml(read("workspace", "Cargo.toml"));
+  assert.deepEqual({ ...project, workspace: null }, {
+    name: null, version: null,
+    deps: [{ name: "crates/*", constraint: null, dev: false }],
+    skipped: [], local: [], workspace: null, virtual: true, layout: "workspace",
   });
+  assert.deepEqual(project.workspace.members, ["crates/*"]);
+  assert.deepEqual(project.workspace.exclude, ["crates/old"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(project.workspace.dependencies)), {
+    serde: "1", "ws-core": { path: "crates/core" }, json: { package: "serde_json", version: "1" },
+  });
+  assert.equal(project.workspace.package.version, "0.1.0");
 });
 
 test("parseCargoToml answers no dependencies for a manifest with neither [package] nor [workspace]", () => {
-  assert.deepEqual(parseCargoToml(""), { name: null, deps: [], skipped: [], local: [] });
+  assert.deepEqual(parseCargoToml(""), { name: null, version: null, deps: [], skipped: [], local: [], root: null });
+});
+
+test("parseCargoToml reads the package version and its workspace pointer", () => {
+  const project = parseCargoToml('[package]\nname = "a"\nversion = "1.2.3"\nworkspace = "../.."\n');
+  assert.equal(project.version, "1.2.3");
+  assert.equal(project.root, "../..");
+  assert.equal(project.workspace, undefined);
+  assert.equal(parseCargoToml('[package]\nname = "a"\nversion = 3\n').version, null);
+});
+
+test("parseCargoToml takes version.workspace = true from its own [workspace.package], else the inherited one", () => {
+  const member = '[package]\nname = "m"\nversion.workspace = true\n';
+  assert.equal(parseCargoToml(member).version, null);
+  assert.equal(parseCargoToml(member, { package: { version: "2.0.0" } }).version, "2.0.0");
+  const root = '[package]\nname = "r"\nversion.workspace = true\n[workspace.package]\nversion = "1.0.0"\n';
+  assert.equal(parseCargoToml(root, { package: { version: "2.0.0" } }).version, "1.0.0");
+});
+
+test("parseCargoToml reads workspace = true from the inherited table, and its own table wins", () => {
+  const inherited = { dependencies: { serde: "1", json: { package: "serde_json", version: "1" }, util: { path: "../util" } } };
+  const member = '[package]\nname = "m"\n[dependencies]\nserde.workspace = true\njson.workspace = true\nutil.workspace = true\n';
+  const { deps, skipped, local } = parseCargoToml(member, inherited);
+  assert.deepEqual(deps, [{ name: "serde", constraint: "1", dev: false }, { name: "serde_json", constraint: "1", dev: false }]);
+  assert.deepEqual(skipped, ["util"]);
+  assert.deepEqual(local, [{ name: "util", constraint: null, dev: false }]);
+  const own = parseCargoToml(`${member}[workspace.dependencies]\nserde = "2"\n`, inherited);
+  assert.deepEqual(own.deps, [
+    { name: "serde", constraint: "2", dev: false }, { name: "json", constraint: "workspace", dev: false }, { name: "util", constraint: "workspace", dev: false },
+  ]);
 });
 
 test("parseCargoToml treats __proto__ as a plain crate name", () => {
@@ -251,7 +325,8 @@ test("without the project's own lock entry, a twice-locked direct takes the vers
   const tree = await singleTree({ ...singleProject(), name: "renamed" });
   assert.equal(find(tree.roots, "syn").version, "2.0.101"); // syn = "2", though 1.0.109 is locked first
   assert.equal(find(tree.roots, "serde").version, "1.0.219");
-  assert.equal(find(tree.roots, "from-git"), undefined); // no lock entry to list path and git directs
+  // Path and git directs come from the manifest, resolved by name in the lock.
+  assert.equal(find(tree.roots, "from-git").version, "0.2.0");
   const project = singleProject();
   project.name = null;
   project.deps = project.deps.map((dep) => (dep.name === "syn" ? { ...dep, constraint: "1" } : dep));
@@ -325,23 +400,19 @@ test("a root package that is also a workspace picks its own lock entry by name",
   assert.equal(countsLine(tree), "2 direct, 3 total");
 });
 
-test("a virtual workspace's top level is its crates, each with its own subtree", async () => {
-  const tree = await treeForProject(parseCargoToml(read("workspace", "Cargo.toml")), lock(read("workspace", "Cargo.lock")), { noLockNote: CARGO_NOTE });
+test("a virtual manifest read alone shows a workspace row over the lock's sourceless packages", async () => {
+  const tree = await treeForProject(parseCargoToml(read("workspace", "Cargo.toml")), lock(workspaceLock()), { noLockNote: CARGO_NOTE });
   assert.equal(tree.note, null);
-  assert.deepEqual(summary(tree.roots), [["ws-cli", "0.1.0", null, false], ["ws-core", "0.1.0", null, false]]);
-  assert.equal(countsLine(tree), "2 direct, 4 total");
-  const cli = find(tree.roots, "ws-cli");
-  await expandNode(tree, cli, [cli.key]);
-  assert.deepEqual(summary(cli.children), [["anyhow", "1.0.98", null, false], ["ws-core", "0.1.0", null, false]]);
-  const core = find(cli.children, "ws-core");
-  await expandNode(tree, core, [cli.key, core.key]);
-  assert.deepEqual(summary(core.children), [["serde", "1.0.219", null, false]]);
+  assert.deepEqual(shape(tree.roots), [["workspace", null, "workspace", false, false]]);
+  assert.deepEqual(shape(tree.roots[0].children), [["ws-cli", "0.1.0", null, false, false], ["ws-core", "0.1.0", null, false, false]]);
 });
 
-test("a virtual workspace without its lock shows the members with the Cargo note", async () => {
-  const tree = await treeForProject(parseCargoToml(read("workspace", "Cargo.toml")), null, { noLockNote: CARGO_NOTE });
+test("a virtual workspace with neither its members nor its lock shows the member strings with the Cargo note", async () => {
+  const project = parseCargoToml(read("workspace", "Cargo.toml"));
+  assert.equal(cargoUnlocked(project), null);
+  const tree = await treeForProject(project, null, { noLockNote: CARGO_NOTE, unlocked: cargoUnlocked });
   assert.equal(tree.note, CARGO_NOTE);
-  assert.deepEqual(tree.roots.map((n) => [n.name, n.leaf]), [["crates/cli", true], ["crates/core", true]]);
+  assert.deepEqual(tree.roots.map((n) => [n.name, n.leaf]), [["crates/*", true]]);
 });
 
 test("a lock that isn't text, isn't TOML or has no packages is an error the tree shows as its note", async () => {
@@ -360,4 +431,219 @@ test("findManifest picks Cargo.toml and parses it", async () => {
   assert.equal(project.ecosystem.note, CARGO_NOTE);
   assert.equal(project.name, "demo");
   assert.equal(project.deps.length, 8);
+});
+
+// --- workspaces ----------------------------------------------------------------
+
+test("cargoProject gathers a virtual workspace's crates at its root", async () => {
+  const project = await gather(workspaceFolder);
+  assert.equal(project.layout, "workspace");
+  assert.equal(project.name, "workspace");
+  assert.equal(project.workspaceFolder, workspaceFolder);
+  assert.equal(project.note, null);
+  assert.equal(project.membersIncomplete, false);
+  assert.deepEqual(project.skipped, ["ws-core", "ws-cli"]);
+  assert.deepEqual(project.crates.map((c) => [c.name, c.version, c.path]), [
+    ["ws-cli", "0.1.0", join(workspaceFolder, "crates", "cli", "Cargo.toml")],
+    ["ws-core", "0.1.0", join(workspaceFolder, "crates", "core", "Cargo.toml")],
+  ]);
+  const [cli, core] = project.crates;
+  assert.deepEqual(cli.deps, [{ name: "anyhow", constraint: "1", dev: false }, { name: "serde_json", constraint: "1", dev: true }]);
+  assert.deepEqual(cli.local, [{ name: "ws-core", constraint: null, dev: false }]);
+  assert.deepEqual(core.deps, [{ name: "serde", constraint: "1", dev: false }]);
+  assert.deepEqual(core.local, [{ name: "ws-cli", constraint: null, dev: true }]);
+});
+
+test("cargoProject places a member folder's crate in its workspace", async () => {
+  const project = await gather(join(workspaceFolder, "crates", "cli"));
+  assert.equal(project.layout, "crate");
+  assert.equal(project.name, "ws-cli");
+  assert.equal(project.version, "0.1.0");
+  assert.equal(project.workspaceFolder, workspaceFolder);
+  assert.equal(project.path, join(workspaceFolder, "crates", "cli", "Cargo.toml"));
+  assert.deepEqual(project.deps, [{ name: "anyhow", constraint: "1", dev: false }, { name: "serde_json", constraint: "1", dev: true }]);
+  assert.deepEqual(project.skipped, ["ws-core"]);
+  assert.deepEqual(project.crates.map((c) => c.name), ["ws-cli", "ws-core"]);
+});
+
+test("cargoProject follows package.workspace to the root", async () => {
+  const io = memoryIo({
+    "/home/w/Cargo.toml": '[workspace]\nmembers = ["deep/*/x"]\n[workspace.dependencies]\nserde = "1"\n',
+    "/home/w/deep/a/x/Cargo.toml": '[package]\nname = "x"\nversion = "1.0.0"\nworkspace = "../../.."\n[dependencies]\nserde.workspace = true\n',
+    "/home/w/deep/a/Cargo.toml": '[workspace]\nmembers = []\n', // not the root: package.workspace names it
+  });
+  const project = await gather("/home/w/deep/a/x", io, "/home");
+  assert.equal(project.layout, "crate");
+  assert.equal(project.workspaceFolder, "/home/w");
+  assert.deepEqual(project.deps, [{ name: "serde", constraint: "1", dev: false }]);
+});
+
+test("cargoProject leaves a crate with no workspace above it unchanged", async () => {
+  const single = await findManifest(join(fixtures, "single"), home, fsIo.read);
+  assert.equal(await cargoProject(single, fsIo), single);
+  const io = memoryIo({ "/home/a/Cargo.toml": '[package]\nname = "a"\n', "/Cargo.toml": '[workspace]\nmembers = ["home/a"]\n' });
+  const bounded = await findManifest("/home/a", "/home", io.read);
+  assert.equal(await cargoProject(bounded, io), bounded); // the walk stops after home
+});
+
+test("cargoProject leaves an excluded crate, and one the members don't match, unchanged", async () => {
+  const old = await findManifest(join(workspaceFolder, "crates", "old"), home, fsIo.read);
+  assert.equal(await cargoProject(old, fsIo), old);
+  const io = memoryIo({
+    "/home/w/Cargo.toml": '[workspace]\nmembers = ["crates/a"]\n',
+    "/home/w/crates/a/Cargo.toml": '[package]\nname = "a"\n',
+    "/home/w/crates/b/Cargo.toml": '[package]\nname = "b"\n',
+  });
+  const b = await findManifest("/home/w/crates/b", "/home", io.read);
+  assert.equal(await cargoProject(b, io), b);
+});
+
+test("cargoProject marks the members incomplete when a folder can't be listed", async () => {
+  const files = {
+    "/home/w/Cargo.toml": '[workspace]\nmembers = ["crates/*", "tools/t"]\n',
+    "/home/w/tools/t/Cargo.toml": '[package]\nname = "t"\nversion = "1.0.0"\n',
+  };
+  const project = await gather("/home/w", memoryIo(files, { list: async () => null }), "/home");
+  assert.equal(project.membersIncomplete, true);
+  assert.deepEqual(project.crates.map((c) => c.name), ["t"]); // the literal member needs no listing
+  const none = await gather("/home/w", memoryIo({ "/home/w/Cargo.toml": '[workspace]\nmembers = ["crates/*"]\n' }, { list: () => { throw new Error("no find"); } }), "/home");
+  assert.equal(none.membersIncomplete, true);
+  assert.deepEqual(none.crates, []);
+});
+
+test("cargoProject reads at most MAX_MEMBERS members and says so", async () => {
+  const files = { "/home/w/Cargo.toml": '[workspace]\nmembers = ["c/*"]\n' };
+  for (let i = 0; i < MAX_MEMBERS + 10; i++) files[`/home/w/c/m${String(i).padStart(3, "0")}/Cargo.toml`] = `[package]\nname = "m${i}"\n`;
+  const project = await gather("/home/w", memoryIo(files), "/home");
+  assert.equal(project.crates.length, MAX_MEMBERS);
+  assert.equal(project.membersIncomplete, true);
+  assert.equal(project.note, `Showing the first ${MAX_MEMBERS} workspace members.`);
+});
+
+test("cargoProject answers the project unchanged when reading throws", async () => {
+  const project = await findManifest(join(workspaceFolder, "crates", "cli"), home, fsIo.read);
+  const io = { ...fsIo, read: () => { throw new Error("boom"); }, parents: () => { throw new Error("boom"); } };
+  assert.equal(await cargoProject(project, io), project);
+  assert.equal(await cargoProject(project, { ...fsIo, read: () => Promise.reject(new Error("boom")) }), project);
+});
+
+test("a workspace shows its row, open, with its crates and their manifests' rows under it", async () => {
+  const expanded = new Set();
+  const tree = await treeForProject(await gather(workspaceFolder), lock(workspaceLock()), { noLockNote: CARGO_NOTE, expanded });
+  assert.equal(tree.note, null);
+  const [root] = tree.roots;
+  assert.deepEqual(shape(tree.roots), [["workspace", null, "workspace", false, false]]);
+  assert.ok(expanded.has(pathOf([root.key])));
+  assert.deepEqual(shape(root.children), [["ws-cli", "0.1.0", null, false, false], ["ws-core", "0.1.0", null, false, false]]);
+  // Runtime: ws-cli, ws-core, anyhow, serde; serde_json only through ws-cli's dev table.
+  assert.equal(countsLine(tree), "2 projects, 5 total");
+  const core = await openAt(tree, tree.roots, [root.key, "ws-core@0.1.0"]);
+  // ws-core's manifest declares ws-cli dev, though the workspace row reaches ws-cli at runtime.
+  assert.deepEqual(shape(core.children), [["serde", "1.0.219", null, false, false], ["ws-cli", "0.1.0", "project", true, false]]);
+  const devCli = await openAt(tree, tree.roots, [root.key, "ws-core@0.1.0", "ws-cli@0.1.0"]);
+  assert.deepEqual(shape(devCli.children), [
+    ["anyhow", "1.0.98", null, false, false], ["serde_json", "1.0.140", null, true, false], ["ws-core", "0.1.0", "project", false, true],
+  ]);
+  const cli = await openAt(tree, tree.roots, [root.key, "ws-cli@0.1.0"]);
+  assert.deepEqual(shape(cli.children), [
+    ["anyhow", "1.0.98", null, false, false], ["serde_json", "1.0.140", null, true, false], ["ws-core", "0.1.0", "project", false, false],
+  ]);
+  const json = await openAt(tree, tree.roots, [root.key, "ws-cli@0.1.0", "serde_json@1.0.140"]);
+  assert.deepEqual(shape(json.children), [["serde", "1.0.219", null, false, false]]); // reached at runtime elsewhere
+});
+
+test("a member folder shows its crate's tree from the workspace's lock, with siblings as projects", async () => {
+  const tree = await treeForProject(await gather(join(workspaceFolder, "crates", "cli")), lock(workspaceLock()), { noLockNote: CARGO_NOTE });
+  assert.equal(tree.note, null);
+  assert.deepEqual(shape(tree.roots), [
+    ["anyhow", "1.0.98", null, false, false], ["serde_json", "1.0.140", null, true, false], ["ws-core", "0.1.0", "project", false, false],
+  ]);
+  assert.equal(countsLine(tree), "3 direct, 4 total"); // ws-cli itself isn't counted
+  const core = await openAt(tree, tree.roots, ["ws-core@0.1.0"]);
+  assert.deepEqual(shape(core.children), [["serde", "1.0.219", null, false, false], ["ws-cli", "0.1.0", "project", true, true]]);
+  assert.equal(find(core.children, "ws-cli").leaf, true);
+});
+
+test("without a lock, a workspace and a member folder keep their shape at manifest versions", async () => {
+  const workspace = await treeForProject(await gather(workspaceFolder), null, { noLockNote: CARGO_NOTE, unlocked: cargoUnlocked });
+  assert.equal(workspace.note, CARGO_NOTE);
+  const [root] = workspace.roots;
+  assert.deepEqual(shape(workspace.roots), [["workspace", null, "workspace", false, false]]);
+  assert.deepEqual(shape(root.children), [["ws-cli", "0.1.0", null, false, false], ["ws-core", "0.1.0", null, false, false]]);
+  const cli = await openAt(workspace, workspace.roots, [root.key, "ws-cli@0.1.0"]);
+  assert.deepEqual(cli.children.map((n) => [n.name, n.version, n.constraint, n.kind, n.dev]), [
+    ["anyhow", null, "1", null, false], ["serde_json", null, "1", null, true], ["ws-core", "0.1.0", null, "project", false],
+  ]);
+  assert.equal(countsLine(workspace), "2 projects, 5 total");
+  const member = await treeForProject(await gather(join(workspaceFolder, "crates", "cli")), null, { noLockNote: CARGO_NOTE, unlocked: cargoUnlocked });
+  assert.deepEqual(shape(member.roots), [["anyhow", null, null, false, false], ["serde_json", null, null, true, false], ["ws-core", "0.1.0", "project", false, false]]);
+  assert.equal(countsLine(member), "3 direct, 4 total");
+});
+
+test("without a lock, a standalone crate shows its directs as before", async () => {
+  assert.equal(cargoUnlocked(singleProject()), null);
+  const tree = await treeForProject(singleProject(), null, { noLockNote: CARGO_NOTE, unlocked: cargoUnlocked });
+  assert.equal(tree.note, CARGO_NOTE);
+  assert.equal(tree.roots.length, 8);
+});
+
+test("a stale lock without the member's entry still shows its siblings", async () => {
+  const tree = await treeForProject(await gather(join(workspaceFolder, "crates", "cli")), lock(withoutEntry(workspaceLock(), "ws-cli")), { noLockNote: CARGO_NOTE });
+  assert.deepEqual(shape(tree.roots), [
+    ["anyhow", "1.0.98", null, false, false], ["serde_json", "1.0.140", null, true, false], ["ws-core", "0.1.0", "project", false, false],
+  ]);
+});
+
+test("the lock's sourceless packages fill in members the listing missed", async () => {
+  const project = { ...await gather(workspaceFolder), membersIncomplete: true };
+  project.crates = project.crates.filter((c) => c.name === "ws-core");
+  const { resolve, direct } = cargoResolver(workspaceLock(), project);
+  assert.deepEqual(resolve(direct[0]).children.map((e) => [e.name, e.version]), [["ws-core", "0.1.0"], ["ws-cli", "0.1.0"]]);
+});
+
+test("a lock edge to a workspace crate is a project row too", async () => {
+  const text = `${workspaceLock()}\n[[package]]\nname = "outside"\nversion = "0.5.0"\ndependencies = ["ws-core"]\n`;
+  const project = { ...await gather(workspaceFolder), membersIncomplete: true };
+  const tree = await treeForProject(project, lock(text), { noLockNote: CARGO_NOTE });
+  const [root] = tree.roots;
+  assert.deepEqual(root.children.map((n) => n.name), ["outside", "ws-cli", "ws-core"]);
+  const outside = await openAt(tree, tree.roots, [root.key, "outside@0.5.0"]);
+  assert.deepEqual(shape(outside.children), [["ws-core", "0.1.0", "project", false, false]]);
+  const core = await openAt(tree, tree.roots, [root.key, "outside@0.5.0", "ws-core@0.1.0"]);
+  assert.deepEqual(core.children.map((n) => n.name), ["serde", "ws-cli"]);
+});
+
+test("a crate with no version anywhere is 0.0.0, and never collides with its workspace row", async () => {
+  const project = {
+    name: "tool", deps: [], skipped: [], layout: "workspace",
+    crates: [{ name: "tool", version: null, folder: "/w/tool", path: "/w/tool/Cargo.toml", deps: [{ name: "x", constraint: "1", dev: false }], skipped: [], local: [] }],
+  };
+  const tree = await treeForProject(project, null, { noLockNote: CARGO_NOTE, unlocked: cargoUnlocked });
+  const [root] = tree.roots;
+  assert.deepEqual(shape(root.children), [["tool", "0.0.0", null, false, false]]);
+  assert.equal(root.children[0].key, "tool@0.0.0");
+  assert.equal(countsLine(tree), "1 projects, 2 total");
+});
+
+test("a row only the lock entry lists declares no dev", async () => {
+  const project = parseCargoToml('[package]\nname = "a"\nversion = "0.1.0"\n');
+  const text = [
+    '[[package]]', 'name = "a"', 'version = "0.1.0"', 'dependencies = ["extra"]',
+    '[[package]]', 'name = "extra"', 'version = "1.0.0"', 'source = "registry+https://github.com/rust-lang/crates.io-index"',
+  ].join("\n");
+  assert.deepEqual(cargoResolver(text, project).direct, [{ name: "extra", constraint: null, version: "1.0.0" }]);
+  assert.equal((await treeForProject(project, lock(text))).roots[0].dev, false);
+});
+
+test("under a dev-only project row, every row is dev", async () => {
+  // ws-cli's entry lists `extra`, which its manifest never names.
+  const text = workspaceLock().replace(' "anyhow",\n "serde_json",', ' "anyhow",\n "extra",\n "serde_json",')
+    + '\n[[package]]\nname = "extra"\nversion = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n';
+  const tree = await treeForProject(await gather(join(workspaceFolder, "crates", "core")), lock(text), { noLockNote: CARGO_NOTE });
+  assert.deepEqual(shape(tree.roots), [["serde", "1.0.219", null, false, false], ["ws-cli", "0.1.0", "project", true, false]]);
+  const cli = await openAt(tree, tree.roots, ["ws-cli@0.1.0"]);
+  assert.deepEqual(shape(cli.children), [
+    ["anyhow", "1.0.98", null, true, false], ["extra", "1.0.0", null, true, false],
+    ["serde_json", "1.0.140", null, true, false], ["ws-core", "0.1.0", "project", true, true],
+  ]);
 });

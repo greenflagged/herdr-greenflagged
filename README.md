@@ -5,11 +5,13 @@ A [Herdr](https://herdr.dev) panel that follows the terminal you're working in, 
 The problems come first, and the greenflagged packages fold away behind a count.
 
 npm only for now. In a Python or Rust project the panel shows a plain tree of its dependencies, read
-from `uv.lock`, `poetry.lock` or `Cargo.lock`, with no verdicts, and sends nothing. A Go project gets
-the same plain tree, read from `go.mod` alone: its direct modules, then its indirect ones in a group. A
-Java or Kotlin project gets its direct dependencies from `pom.xml` or the Gradle build file, without
-running Maven or Gradle, plus the versions in `gradle.lockfile` when there is one. Python verdicts
-follow once Greenflagged's PyPI audit is live.
+from `uv.lock`, `poetry.lock` or `Cargo.lock`, with no verdicts, and sends nothing. A Cargo workspace
+shows as the workspace with its crates under it, and a crate's folder inside one shows that crate with
+its sibling crates as expandable `(project)` rows, read from the workspace's `Cargo.lock`. A Go project
+gets the same plain tree, read from `go.mod` alone: its direct modules, then its indirect ones in a
+group. A Java or Kotlin project gets its direct dependencies from `pom.xml` or the Gradle build file,
+without running Maven or Gradle, plus the versions in `gradle.lockfile` when there is one. Python
+verdicts follow once Greenflagged's PyPI audit is live.
 
 ## What it looks like
 
@@ -81,8 +83,10 @@ Herdr first, then on that one, so you only need to sign in on one of them.
   to import and review that package, under your token. Nothing is requested unless you click.
 - **Files:** it reads `package.json` from your terminal's folder and the folders above it, looks for
   `pyproject.toml`, `requirements.txt`, `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle.kts` and
-  `build.gradle` there too, `uv.lock` and `poetry.lock` beside a Python manifest, `Cargo.lock` beside a
-  Rust one, and `gradle.lockfile` beside a Gradle build file. For a Gradle build it also looks for
+  `build.gradle` there too, `uv.lock` and `poetry.lock` beside a Python manifest, `Cargo.lock` at the
+  root of a Rust project's workspace (beside the manifest for a crate outside any), and
+  `gradle.lockfile` beside a Gradle build file. In a Rust workspace it reads the root's `Cargo.toml`
+  and every member crate's. For a Gradle build it also looks for
   `settings.gradle.kts` or `settings.gradle` in the build file's folder and the folders above it,
   stopping before your home folder (home is checked only when the build file itself is there), and
   reads `gradle/libs.versions.toml`, `build.gradle.kts` and `build.gradle` from the first folder that
@@ -90,8 +94,8 @@ Herdr first, then on that one, so you only need to sign in on one of them.
   the settings file includes (up to 100), only plain folder names under the root, never `..`. It
   reads `~/.npmrc`. It writes nothing to your project. Requests are remembered in Herdr's
   `shared.json`.
-- **Programs:** it runs `printenv` to read your token, `xdg-open` or `open` when you click a row, and
-  `npm login` when you click Sign in.
+- **Programs:** it runs `printenv` to read your token, `xdg-open` or `open` when you click a row,
+  `find` to list a Cargo workspace's member folders, and `npm login` when you click Sign in.
 
 ## When it checks
 

@@ -45,7 +45,7 @@ Levels and labels come from the audit `status`:
   audit yet. The nearest folder with any of them wins, and within one folder `package.json` wins.
   When the winner can't be audited, it sends no request. A Python or Rust project shows a plain tree of
   its dependencies, read from `uv.lock`, `poetry.lock` or `Cargo.lock` beside the manifest when there is
-  one. A Go project shows a plain tree read from `go.mod` alone (direct modules, an "indirect" group,
+  one (for a Rust crate in a workspace, the workspace root's `Cargo.lock`). A Go project shows a plain tree read from `go.mod` alone (direct modules, an "indirect" group,
   `replace` applied; `go.js`'s header lists the edge cases). It also looks for `pom.xml`, then
   `build.gradle.kts`, then `build.gradle` (Java/Kotlin, after `go.mod`). A Maven project shows its
   POM's direct dependencies (`maven.js`'s header lists the edge cases) and a sentence saying the full
@@ -110,7 +110,9 @@ Levels and labels come from the audit `status`:
   Walks stop at a hard ceiling (`MAX_WALK_VISITS`, `MAX_WALK_POPS`). A lockfile over 16 MB isn't read, and
   a TOML lockfile is parsed without its wheel-hash lines, after which it must be under 1 MiB. It also
   exports `graphResolver` (a lock's package list to `resolve`) and `mergeDirect` (a lock's own record of
-  the project's directs, joined with the manifest's) for each language to reuse.
+  the project's directs, joined with the manifest's) for each language to reuse. A row may carry a
+  `kind`, drawn as a `(kind)` tag; a lone `(workspace)` root opens by itself and the counts then read
+  "N projects, M total".
 - `python.js`: pure logic, Python's half of the tree: `pyproject.toml` (PEP 621, dependency groups,
   poetry) and `requirements.txt` parsers, and `uv.lock` / `poetry.lock` read into package lists.
   Measured 2026-11-01 under Node 26.3.0 (mean of 20 runs, on a local `uv init` project that isn't in
@@ -120,10 +122,14 @@ Levels and labels come from the audit `status`:
   At #7's estimated ~1000× for Herdr that is ~0.1 s and ~1.3 s. Its header lists the Python edge
   cases.
 - `cargo.js`: pure logic, Rust's half of the tree: a `Cargo.toml` parser (dependency, build and dev
-  tables, target tables with their cfg as the marker, `package` renames, `workspace = true`, virtual
-  manifests) and `Cargo.lock` read into a package list. A v3 or v4 lock edge names a version only when two
-  versions of that crate are locked, and the project's own lock entry says which one a direct means
-  (without one, the highest locked version the direct's constraint allows).
+  tables, target tables with their cfg as the marker, `package` renames, `workspace = true` and
+  `version.workspace = true`, virtual manifests) and `Cargo.lock` read into a package list. A v3 or v4
+  lock edge names a version only when two versions of that crate are locked, and a crate's own lock entry
+  says which one a direct means (without one, the highest locked version the direct's constraint
+  allows). `cargoProject` is the ecosystem's `gather` hook: it finds the workspace root above a crate,
+  reads every member's `Cargo.toml` with I/O main.js injects, and says where the lock is. The tree is then
+  a `(workspace)` row over the crates, or a member's own rows, with sibling crates as `(project)` rows
+  that expand to their manifests; `cargoUnlocked` gives that shape without a lock.
   Its header lists the Rust edge cases.
 - `go.js`: pure logic, Go's half of the tree: `go.mod` read line by line into direct and indirect
   modules with `replace` applied. It runs nothing (no `go mod graph`) and reads no module cache, so
@@ -144,9 +150,13 @@ Levels and labels come from the audit `status`:
   subprojects; the version catalog through `toml.js`; and `gradle.lockfile` as the lockfile, with a
   "resolved" group like Go's "indirect". It runs no `gradle` and reads no `~/.gradle`. Its header lists
   the forms it matches and the Gradle edge cases, and records its Node timing.
+- `workspace.js`: pure logic with no imports at all: expanding a workspace's member globs against folder
+  listings, minus its excluded folders, capped at 256. Language-neutral, so uv, pnpm or go.work can reuse it.
 - `main.js`: the `View`. From `herdr`: `spaces`, `panes`, `focused`, `exec`, `home`, `readTextFile`,
-  `watchFolder`, `theme`. It runs `printenv`, `xdg-open` then `open` for links, and
-  `npm login` through `run("tab.new", { name, argv, folder })`.
+  `watchFolder`, `theme`. It runs `printenv`, `xdg-open` then `open` for links, `find` to list a
+  workspace's member folders, and `npm login` through `run("tab.new", { name, argv, folder })`. All of
+  its I/O goes through `herdr` with `on`, one path for local and remote spaces; it doesn't import Node's
+  `fs`, which reads only under `$HOME` and whose failed import would stop the whole mod loading.
 - The audit is one JSON-RPC `tools/call` of `audit_manifest` by `POST https://greenflagged.dev/mcp` with
   `Authorization: Bearer <token>`. The endpoint is stateless, so there is no `initialize`. The answer
   arrives as JSON or as one SSE event, and the result is JSON text in `result.content[0].text`, keyed by
@@ -165,8 +175,12 @@ Levels and labels come from the audit `status`:
   direct (numpy behind four `python_full_version` markers is four rows).
 - The Python edge cases (markers on merged rows, poetry's double locks, uv workspaces) are listed in
   `python.js`'s header.
-- The Rust edge cases (workspace members with no lock beside them, `workspace = true` outside the
-  workspace root, path dependencies in a virtual workspace's top level) are listed in `cargo.js`'s header.
+- The Rust edge cases (workspace discovery, member globs, when a crate counts as standalone, dev tags
+  under a crate, the no-lock shape, members outside the root folder that aren't watched) are listed in
+  `cargo.js`'s header.
+- A Rust crate in a workspace watches the workspace root, recursively, so `target/` is in the watched
+  tree. Only manifest and lockfile names trigger a refresh; if a build makes the panel lag, drop paths
+  containing `/target/` before that match.
 - `fetch` in a mod returns `{ status, url, ok, text(), json() }` and no response headers.
 - `audit_manifest` is capped at 500 entries and lists direct dependencies only.
 - npm aliases (`"x": "npm:lodash@^4"`) must be audited under the real package name.
@@ -218,8 +232,13 @@ Levels and labels come from the audit `status`:
   a tag, both `pytest` rows tagged `dev`, and `httpx` expanding to `h2` with markers. With `uv.lock`
   deleted and ↻ clicked, it shows the no-lockfile note and the three manifest dependencies.
 - In a Rust project with a `Cargo.lock`, the panel shows "N direct, M total", `[dev-dependencies]`
-  tagged `dev` and `[target.'cfg(...)'.dependencies]` with their cfg as a tag. In a virtual workspace the
-  top level is the workspace's crates.
+  tagged `dev` and `[target.'cfg(...)'.dependencies]` with their cfg as a tag. At a workspace root
+  (crab-trade on 2026-11-01) it shows "13 projects, 465 total" under an open "crab-trade (workspace)" row; expanding
+  `crab-daemon` shows `crab-core 0.1.0 (project)`, which expands to crab-core's own dependencies, and
+  `crab-analysis` shows its `tokio` tagged `dev`. In `crates/daemon` it shows "26 direct, 416 total" with
+  versions and the sibling crates as `(project)` rows, and no no-lockfile note. Saving a member's
+  `Cargo.toml` rebuilds the tree. With `Cargo.lock` moved away and ↻ clicked, the workspace row and its
+  crates still show, at manifest versions, with the no-lockfile note.
 - Flipping between two projects inside 5 minutes sends one audit for each, not one per switch.
 - `›` gives a rail with the right counts, and `‹` restores the width, including after a restart.
 - `↗` opens a window that survives a restart, on the same project if frozen, and `↙` brings the panel back.
