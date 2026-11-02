@@ -2,7 +2,7 @@
 
 A dependency tree viewer for Herdr. It follows the terminal you're working in and shows the project's dependency tree for npm, Python, Rust, Go, Java and Kotlin, read from its manifest and lockfile. It needs no account. Greenflagged's checks are the extra layer: signed in, an npm (JavaScript) project's rows become verdicts, so the panel spots rejected and unreviewed dependencies as your agent works and shows what to use instead. [Greenflagged](https://greenflagged.dev) is a private npm registry that scans and reviews every package it serves. It is free for personal use.
 
-![Panel for the Rust workspace crab-trade reading "Rust: no Greenflagged checks yet", "13 projects, 465 total" and "10 local or git dependencies have no registry check", with an open crab-trade (workspace) row over its thirteen crates, each at 0.1.0](preview.png)
+![Panel for the Rust workspace ripgrep reading "Rust: no Greenflagged checks yet", "10 projects, 60 total" and "9 local or git dependencies have no registry check", with an open ripgrep (workspace) row over its ten crates, from globset 0.4.21 to ripgrep 15.2.0](preview.png)
 
 ## What you see
 
@@ -270,10 +270,10 @@ Levels and labels come from the audit `status`:
   deleted and ↻ clicked, it shows the no-lockfile note and the three manifest dependencies.
 - In a Rust project with a `Cargo.lock`, the panel shows "N direct, M total", `[dev-dependencies]`
   tagged `dev` and `[target.'cfg(...)'.dependencies]` with their cfg as a tag. At a workspace root
-  (crab-trade on 2026-11-01) it shows "13 projects, 465 total" under an open "crab-trade (workspace)" row; expanding
-  `crab-daemon` shows `crab-core 0.1.0 (project)`, which expands to crab-core's own dependencies, and
-  `crab-analysis` shows its `tokio` tagged `dev`. In `crates/daemon` it shows "26 direct, 416 total" with
-  versions and the sibling crates as `(project)` rows, and no no-lockfile note. Saving a member's
+  (BurntSushi/ripgrep at 91f5d22, on 2026-11-02) it shows "10 projects, 60 total" under an open
+  "ripgrep (workspace)" row over its ten crates. In `crates/ignore` it shows "10 direct, 30 total" with
+  versions, `crossbeam-channel` tagged `dev`, `winapi-util` tagged `cfg(windows)`, and the sibling crate
+  as `globset 0.4.21 (project)`, which expands to globset's own dependencies, and no no-lockfile note. Saving a member's
   `Cargo.toml` rebuilds the tree. With `Cargo.lock` moved away and ↻ clicked, the workspace row and its
   crates still show, at manifest versions, with the no-lockfile note.
 - Flipping between two projects inside 5 minutes sends one audit for each, not one per switch.

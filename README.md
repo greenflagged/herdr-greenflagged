@@ -30,11 +30,11 @@ live.
 
 At the root of a Rust workspace, the panel shows the workspace with its crates under it:
 
-![Panel for the Rust workspace crab-trade reading "Rust: no Greenflagged checks yet", "13 projects, 465 total" and "10 local or git dependencies have no registry check", with an open crab-trade (workspace) row over its thirteen crates, each at 0.1.0](preview.png)
+![Panel for the Rust workspace ripgrep reading "Rust: no Greenflagged checks yet", "10 projects, 60 total" and "9 local or git dependencies have no registry check", with an open ripgrep (workspace) row over its ten crates, from globset 0.4.21 to ripgrep 15.2.0](preview.png)
 
-In one crate of that workspace, with two sibling crates open:
+In one crate of that workspace, with a sibling crate as a `(project)` row:
 
-![Panel for crab-daemon reading "Rust: no Greenflagged checks yet" and "26 direct, 416 total", with its dependencies as plain rows and the crab-notifier and crab-risk sibling crates expanded to their own dependencies, some tagged dev](docs/4-tree.webp)
+![Panel for ripgrep's ignore crate reading "Rust: no Greenflagged checks yet", "10 direct, 30 total" and "1 local or git dependencies have no registry check", with its ten dependencies as plain rows: crossbeam-channel tagged dev, winapi-util tagged cfg(windows), and the sibling crate globset 0.4.21 tagged (project)](docs/4-tree.webp)
 
 An npm project before you sign in shows its direct dependencies the same way, with the sign-in link
 above them:
@@ -43,7 +43,7 @@ above them:
 
 ### With Greenflagged checks
 
-Signed in, the same npm panel checks every direct dependency. Here it opens on a project with one
+Signed in, the same npm panel checks its registry dependencies, up to 500 of them; local and git ones have no registry check. Here it opens on a project with one
 blocked dependency and suggests a replacement for it:
 
 ![link-shortener project with 7 ok, 3 attention and 1 blocked; request is rejected, with @cypress/request suggested instead](docs/1-before.webp)

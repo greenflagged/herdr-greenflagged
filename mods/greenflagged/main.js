@@ -5,7 +5,7 @@ import {
 } from "herdr";
 import {
   MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditOutcome, auditRequest, cachedAudit, findBlock, findManifest, lastValidProject, packageUrl, parentFolders,
-  parseToolResponse, rememberRequest, requestCall, rows, staleNote, storeAudit, summarize, tokenFromNpmrc, withRequests,
+  parseToolResponse, rememberRequest, requestCall, rows, screenAfterOutcome, staleNote, staleState, storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
 import { countsLine, expandNode, failedNote, topLevel, treeForProject, visibleRows } from "./tree.js";
 
@@ -183,10 +183,8 @@ export default class Greenflagged extends View {
           // Mid-edit: keep the last valid list or tree of this file on this machine, dimmed,
           // with the error over it.
           const last = lastValidProject(this.project, project);
-          // By what is on screen: an audited project signed out shows a tree, not a list.
-          if (last && (this.list || this.tree)) {
-            return settle(this.list ? "error" : last.ecosystem.audited ? "signed-out" : "unsupported", staleNote(project.error), true);
-          }
+          const stale = last && staleState(this, last.ecosystem.audited);
+          if (stale) return settle(stale, staleNote(project.error), true);
           if (project.path !== this.project?.path || project.on !== this.project?.on) { this.tree = null; this.treeSource = null; this.expanded = new Set(); }
           this.project = project; this.list = null;
           return settle("error", project.error);
@@ -217,9 +215,9 @@ export default class Greenflagged extends View {
         if (run !== this.run) return;
         const outcome = auditOutcome(this.token, response?.status);
         if (outcome.forget) this.token = null;
+        Object.assign(this, screenAfterOutcome(outcome, this));
         // Signed out, the panel is still a tree viewer: the plain tree, with a sign-in line.
         if (outcome.view === "tree") {
-          this.list = null;
           await this.buildProjectTree(project, here, run, cx);
           if (run !== this.run) return;
           return settle("signed-out", outcome.message);

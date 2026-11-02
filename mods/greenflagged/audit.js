@@ -228,6 +228,22 @@ export function lastValidProject(previous, failed) {
 }
 export const staleNote = (error) => `${error} · showing the last valid version`;
 
+// Mid-edit, the state to show over the last valid view, chosen by what is on screen: the
+// audit's list, or a tree, which for an audited project means signed out. Null with neither.
+export function staleState({ list, tree }, audited) {
+  if (list) return "error";
+  if (tree) return audited ? "signed-out" : "unsupported";
+  return null;
+}
+
+// What an audited project keeps on screen once the audit has answered. An error drops the
+// tree, so a mid-edit after it doesn't pick the signed-out view for a panel holding a token.
+export function screenAfterOutcome(outcome, { list, tree, treeSource }) {
+  if (outcome.view === "tree") return { list: null, tree, treeSource };
+  if (outcome.view === "error") return { list, tree: null, treeSource: null };
+  return { list, tree, treeSource };
+}
+
 // A parser should answer { error } on bad input; one that throws gets the same
 // { error } result, so findManifest still returns the project and its message names
 // the manifest file.

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
-  AUDIT_TTL_MS, ECOSYSTEMS, NPM_NOTE, REFUSED_NOTE, auditOutcome, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc, lastValidProject, staleNote,
+  AUDIT_TTL_MS, ECOSYSTEMS, NPM_NOTE, REFUSED_NOTE, auditOutcome, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc, lastValidProject, staleNote, staleState, screenAfterOutcome,
 } from "../mods/greenflagged/audit.js";
 import { countsLine, treeForProject } from "../mods/greenflagged/tree.js";
 
@@ -571,6 +571,27 @@ test("a token the audit accepts shows the audit; any other answer is an error", 
   assert.deepEqual(auditOutcome("gflag_x", 200), { view: "audit", message: null, forget: false });
   assert.deepEqual(auditOutcome("gflag_x", 500), { view: "error", message: "Greenflagged answered 500.", forget: false });
   assert.deepEqual(auditOutcome("gflag_x", 429), { view: "error", message: "Greenflagged answered 429.", forget: false });
+});
+
+test("an audit error drops a signed-out tree, so a later mid-edit isn't shown as signed out", () => {
+  const tree = { roots: [] };
+  const signedOut = { list: null, tree, treeSource: "s" };
+  assert.equal(staleState(signedOut, true), "signed-out");
+  const afterError = screenAfterOutcome(auditOutcome("gflag_x", 500), signedOut);
+  assert.deepEqual(afterError, { list: null, tree: null, treeSource: null });
+  assert.equal(staleState(afterError, true), null);
+});
+
+test("the tree outcome keeps the tree and drops the list; the audit outcome leaves both", () => {
+  const tree = { roots: [] }, list = [{ name: "a" }];
+  assert.deepEqual(screenAfterOutcome(auditOutcome(null), { list, tree, treeSource: "s" }), { list: null, tree, treeSource: "s" });
+  assert.deepEqual(screenAfterOutcome(auditOutcome("gflag_x", 200), { list, tree, treeSource: "s" }), { list, tree, treeSource: "s" });
+});
+
+test("staleState follows what is on screen", () => {
+  assert.equal(staleState({ list: [], tree: null }, true), "error");
+  assert.equal(staleState({ list: null, tree: {} }, false), "unsupported");
+  assert.equal(staleState({ list: null, tree: null }, false), null);
 });
 
 test("the npm entry is audited, has its own note, and reads no lockfile", () => {
