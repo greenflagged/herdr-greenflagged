@@ -52,8 +52,8 @@ Levels and labels come from the audit `status`:
   `mvn dependency:tree`, which the panel doesn't run. A Gradle project shows the dependencies its build
   file declares, matched as text and never evaluated, with `libs.*` resolved from
   `gradle/libs.versions.toml`, read from the build root: the nearest folder holding
-  `settings.gradle.kts` or `settings.gradle`, found from the build file's folder upward but never at
-  home. With `gradle.lockfile` beside the build file, the locked versions fill the rows and the other
+  `settings.gradle.kts` or `settings.gradle`, found from the build file's folder upward, stopping
+  before home unless the build file is in home itself. With `gradle.lockfile` beside the build file, the locked versions fill the rows and the other
   locked entries sit under a collapsed "resolved" row; without one, a sentence says the full tree needs
   `gradle dependencies` (`gradle.js`'s header lists the edge cases). The header reads "Not checked:
   Kotlin" when the build applies a Kotlin plugin, else "Not checked: Java/Kotlin". Rust says
@@ -190,9 +190,10 @@ Levels and labels come from the audit `status`:
 - Never put the token in `localStorage` or draw it.
 - Never call `resolve_dep_tree` for this: it queues imports unless `autoRequest` is false.
 - A Gradle subproject reads `settings.gradle(.kts)`, `gradle/libs.versions.toml` and the root's build
-  file from its build root,
-  above its own folder, so the panel watches the build root (`project.root`), not the subproject's
-  folder. The walk to find that root never reads home, so the panel never watches home on its account.
+  file from its build root, above its own folder, so the panel watches the build root
+  (`project.root`), not the subproject's folder. The walk to find that root reads home only when the
+  build file is in home itself, which the panel already watches, so it never starts watching home
+  for a project below it.
   An unrelated settings file between the project and home is taken as the root, as Gradle itself
   would.
 

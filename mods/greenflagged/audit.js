@@ -67,8 +67,9 @@ const LABELS = {
 //                   reads the `root` names in each folder; the first folder holding any of
 //                   them is the build root, and the `files` are read from that one folder.
 //                   The walk visits the manifest's folder and then only ancestors strictly
-//                   below home, so home and `/` are never read for a root marker; with no
-//                   marker anywhere, the manifest's folder is the root. Every name lands in
+//                   below home, so home and `/` are read for a root marker only when the
+//                   manifest itself is there; with no marker anywhere, the manifest's
+//                   folder is the root. Every name lands in
 //                   `parse`'s `files` (null when missing), and the root becomes
 //                   `project.root`, which the panel watches. A project from an entry
 //                   without companions has `root` equal to `folder`.

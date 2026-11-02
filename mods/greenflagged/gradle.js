@@ -25,7 +25,8 @@
 // Gradle edge cases, so RECIPE.md can point here instead of growing:
 // - The build root is the nearest folder, from the build file's own upward, holding
 //   `settings.gradle.kts` or `settings.gradle`, as Gradle itself looks for it. The walk
-//   never reads home or `/`, so a stray `~/settings.gradle.kts` is ignored; an
+//   reads home or `/` only when the build file is there itself, so a stray
+//   `~/settings.gradle.kts` is ignored by a project below home; an
 //   unrelated settings file in a folder between the project and home is taken as the
 //   root, as Gradle would. With no settings file, the build file's folder is the root.
 //   The catalog is read from `<root>/gradle/libs.versions.toml` only, so an included
