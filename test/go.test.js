@@ -103,6 +103,21 @@ test("replace applies to indirect modules too", () => {
   assert.deepEqual(indirect, [{ name: "z", version: "v1.1.0", constraint: "v1.0.0", dev: false, marker: "replaces a" }]);
 });
 
+test("modules replaced by the same module@version share one row naming every old path", async () => {
+  const text = "require (\n\ta v1.0.0\n\tb v1.0.0\n\tz v1.0.0\n\tc v1.0.0 // indirect\n)\nreplace a => z v1.0.0\nreplace b => z v1.0.0\nreplace c => z v1.0.0\n";
+  const { direct, indirect } = readGoMod(text);
+  assert.deepEqual(direct, [{ name: "z", version: "v1.0.0", constraint: "v1.0.0", dev: false, marker: "replaces a, b, c" }]);
+  assert.deepEqual(indirect, []);
+  const tree = await goTree(text);
+  assert.equal(countsLine(tree), "1 direct, 1 total");
+  assert.deepEqual(directRoots(tree).map((n) => n.marker), ["replaces a, b, c"]);
+});
+
+test("replaced by different versions of one module, they stay two rows", () => {
+  const { direct } = readGoMod("require (\n\ta v1.0.0\n\tb v1.0.0\n)\nreplace a => z v1.0.0\nreplace b => z v2.0.0\n");
+  assert.deepEqual(direct.map((m) => [m.name, m.version, m.marker]), [["z", "v1.0.0", "replaces a"], ["z", "v2.0.0", "replaces b"]]);
+});
+
 test("a replace of a module that isn't required is ignored, not skipped", () => {
   const result = readGoMod("require a v1.0.0\nreplace (\n\tb => ./b\n\tc => d v1.0.0\n)\n");
   assert.deepEqual(pairs(result.direct), [["a", "v1.0.0"]]);
@@ -110,6 +125,13 @@ test("a replace of a module that isn't required is ignored, not skipped", () => 
 });
 
 // --- ignored directives ----------------------------------------------------------
+
+test("a block opener inside an open block starts the new block instead of listing `require`", () => {
+  const result = readGoMod("require (\n\ta v1.0.0\nrequire (\n\tb v1.0.0\n)\nreplace(\n\tb => c v2.0.0\n)\n");
+  assert.deepEqual(pairs(result.direct), [["a", "v1.0.0"], ["c", "v2.0.0"]]);
+  assert.deepEqual(pairs(readGoMod("require (\nrequire (\n").direct), []);
+  assert.deepEqual(pairs(readGoMod("exclude (\n\tx v1.0.0\nrequire (\n\ty v1.0.0\n)\n").direct), [["y", "v1.0.0"]]);
+});
 
 test("exclude, retract, go, toolchain, godebug, tool and unknown directives are ignored, line or block", () => {
   const base = "module m\nrequire a v1.0.0\n";

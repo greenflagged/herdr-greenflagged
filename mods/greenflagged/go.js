@@ -23,6 +23,8 @@
 //   `replace a v1 => …` applies only to a@v1, and beats a plain `replace a => …`.
 //   A replacement by another module shows the replacement's path and version, with
 //   `replaces <old path>` beside it; the version as required stays the row's constraint.
+//   Modules replaced by the same module@version share one row, and its marker lists
+//   every old path (`replaces a, b`), so "N direct" counts that row once.
 // - A replacement by a local path (`./x`, `../x`, `/abs`, or anything with no version)
 //   drops the module from the tree and counts it on the "not checked" line under its
 //   original path. A `replace` of a module go.mod doesn't require is ignored.
@@ -68,6 +70,13 @@ function readReplace(args) {
   };
 }
 
+// `<directive> (` or `<directive>(` → the directive, else null.
+function blockOpener(tokens) {
+  if (tokens.length === 2 && tokens[1] === "(") return tokens[0];
+  if (tokens.length === 1 && tokens[0].length > 1 && tokens[0].endsWith("(")) return tokens[0].slice(0, -1);
+  return null;
+}
+
 // go.mod → { name, direct, indirect, skipped }. `direct` and `indirect` are
 // [{ name, version, constraint, dev: false, marker? }] after replaces; `skipped` holds
 // the original paths of modules replaced by a local path.
@@ -87,13 +96,15 @@ export function readGoMod(text) {
   for (const raw of text.split(/\r?\n/)) {
     const { tokens, indirect } = lineTokens(raw);
     if (!tokens.length) continue;
+    // A block opener inside an open block (Go rejects it) starts the new block, so a
+    // truncated block can't swallow the next one or list `require` as a module.
+    const opens = blockOpener(tokens);
+    if (opens !== null) { block = opens; continue; }
     if (block !== null) {
       if (tokens[0] === ")") block = null;
       else act(block, tokens, indirect);
       continue;
     }
-    if (tokens.length === 2 && tokens[1] === "(") { block = tokens[0]; continue; }
-    if (tokens.length === 1 && tokens[0].length > 1 && tokens[0].endsWith("(")) { block = tokens[0].slice(0, -1); continue; }
     act(tokens[0], tokens.slice(1), indirect);
   }
 
@@ -108,6 +119,10 @@ export function readGoMod(text) {
   const skipped = new Set();
   const replaceFor = (path, version) =>
     replaces.find((r) => r.from === path && r.fromVersion === version) ?? replaces.find((r) => r.from === path && r.fromVersion === null);
+  // Two required modules replaced by the same module@version are one module in the build,
+  // so they are one row, its marker naming every path it replaces. A direct row absorbs
+  // an indirect one, as a direct line beats an indirect one above.
+  const rows = new Map();
   const apply = (map) => {
     const out = [];
     for (const [path, version] of map) {
@@ -117,13 +132,18 @@ export function readGoMod(text) {
       if (replace) {
         module.name = replace.to;
         module.version = replace.toVersion;
-        if (replace.to !== path) module.marker = `replaces ${path}`;
       }
+      const replaced = module.name !== path ? [path] : [];
+      const key = `${module.name}@${module.version}`;
+      const row = rows.get(key);
+      if (row) { row.replaced.push(...replaced); continue; }
+      rows.set(key, { module, replaced });
       out.push(module);
     }
     return out;
   };
   const direct = apply(directs), indirectList = apply(indirects);
+  for (const { module, replaced } of rows.values()) if (replaced.length) module.marker = `replaces ${replaced.join(", ")}`;
   return { name, direct, indirect: indirectList, skipped: [...skipped] };
 }
 
