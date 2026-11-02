@@ -7,7 +7,8 @@ import {
   MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditRequest, cachedAudit, findBlock, findManifest, lastValidProject, packageUrl, parentFolders,
   parseToolResponse, rememberRequest, requestCall, rows, staleNote, storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
-import { countsLine, expandNode, failedNote, topLevel, treeForProject, visibleRows } from "./tree.js";
+import { locateCache, openCache, sessionReader } from "./cache.js";
+import { countsLine, expandFailedNote, expandNode, topLevel, treeForProject, visibleRows } from "./tree.js";
 
 const RECHECK_MS = 15 * 60 * 1000; // reviews finish on the registry's time, not ours
 const TOKEN_URL = "greenflagged.dev/account/tokens";
@@ -54,6 +55,25 @@ async function readToken(on) {
   return null;
 }
 
+// A lockfile's declared cache (cache.js) on the project's machine: located from that
+// machine's environment on every build, so a moved cache is seen at the next one, and
+// read through a reader confined to the declaration. `memos` keeps one session memo per
+// machine and cache folder. Null when no cache folder is found.
+async function openProjectCache(spec, here, memos) {
+  const on = here.on ?? null;
+  const env = async (name) => {
+    const result = await exec("printenv", [name], { on }).catch(() => null);
+    return result?.code === 0 ? result.stdout.trim() : null;
+  };
+  const dir = await locateCache(spec, { env, home: () => (on ? env("HOME") : home()) });
+  if (!dir) return null;
+  // No `.catch`: a failed read must reject, so it reads as "couldn't read", not "absent".
+  const read = (path) => readTextFile(path, { on });
+  const id = `${on ?? ""}\u0000${dir}`;
+  if (!memos.has(id)) memos.set(id, sessionReader(read));
+  return openCache(spec, dir, read, memos.get(id));
+}
+
 // The names of `dir`'s sub-folders, on the project's machine. `find` lists what it can
 // and exits non-zero when some entry is unreadable, so its lines are kept whatever the
 // exit code; null only when it printed nothing and failed (a missing folder, no `find`).
@@ -95,6 +115,7 @@ export default class Greenflagged extends View {
     this.tree = null; // built once per manifest or lockfile change, never in render
     this.treeSource = null;
     this.expanded = new Set(); // row paths, see tree.js
+    this.cacheMemos = new Map(); // `${on}\0${cache folder}` → sessionReader, kept for the session
     this.frozen = Boolean(given.frozen);
     this.here = given.here;
     this.refresh(cx);
@@ -197,6 +218,9 @@ export default class Greenflagged extends View {
         if (!project.ecosystem.audited) {
           this.project = project; this.list = null;
           if (Array.isArray(project.deps)) {
+            // ↻ and the timer rebuild a tree backed by a cache, which can fill or empty
+            // (`go mod download`, `go clean -modcache`) while the lockfile stays the same.
+            if (force && this.tree?.cacheBacked) this.treeSource = null;
             if (changedProject) settle("loading"); // not the last project's view while the lockfile is read
             await this.buildProjectTree(project, here, run, cx);
             if (run !== this.run) return;
@@ -241,8 +265,10 @@ export default class Greenflagged extends View {
     // The 15-minute timer and a save that changes nothing don't rebuild.
     const source = JSON.stringify([here.on, project.path, project.deps, project.fingerprint ?? null, lock?.file ?? null, lock?.text ?? null]);
     if (source === this.treeSource && this.tree) return;
+    const cache = lock?.cache ? await openProjectCache(lock.cache, here, this.cacheMemos) : null;
+    if (run !== this.run) return;
     const tree = await treeForProject(project, lock, {
-      noLockNote: project.ecosystem.note, expanded: this.expanded, pause: () => cx.sleep(0), stale: () => run !== this.run,
+      noLockNote: project.ecosystem.note, expanded: this.expanded, pause: () => cx.sleep(0), stale: () => run !== this.run, cache,
       unlocked: project.ecosystem.unlocked ?? null,
     });
     if (!tree || run !== this.run) return;
@@ -258,9 +284,14 @@ export default class Greenflagged extends View {
     if (node.children) return cx.notify();
     const pending = expandNode(tree, node, keys);
     cx.spawn(async (cx) => {
-      try { await pending; } catch (error) {
+      // A failed open names the row's module when its file is in a cache, else the
+      // lockfile (expandFailedNote). A later successful open clears that note.
+      try {
+        await pending;
+        if (this.tree === tree && tree.note && tree.note === tree.expandNote) tree.note = tree.expandNote = null;
+      } catch (error) {
         expanded.delete(path); // back to ▸, so the next click retries
-        if (this.tree === tree) tree.note = failedNote(tree.lockFile, error);
+        if (this.tree === tree) tree.note = tree.expandNote = expandFailedNote(tree, node, error);
       }
       if (this.tree === tree) cx.notify();
     });
@@ -429,7 +460,8 @@ export default class Greenflagged extends View {
       .when(Boolean(node.marker), (el) => el.child(div().flex_none().truncate().max_w(110).text_color(this.stale ? t.dim : t.muted).text_size(11).child(node.marker)))
       .when(Boolean(node.kind), (el) => el.child(tag(`(${node.kind})`)))
       .when(node.dev, (el) => el.child(tag("dev")))
-      .when(node.cycle, (el) => el.child(tag("(cycle)")));
+      .when(node.cycle, (el) => el.child(tag("(cycle)")))
+      .when(Boolean(node.tag), (el) => el.child(tag(node.tag)));
   }
 
   control(id, label, color, t, onClick) {
