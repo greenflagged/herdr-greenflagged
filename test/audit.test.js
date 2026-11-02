@@ -389,6 +389,19 @@ test("lastValidProject keeps the last valid read of the same file only", async (
   assert.equal(lastValidProject(undefined, bad), null);
 });
 
+test("lastValidProject never carries a view across machines", async () => {
+  const good = await findManifest("/r", "/Users/a", files({ "/r/package.json": '{"dependencies":{"a":"1"}}' }));
+  const bad = await findManifest("/r", "/Users/a", files({ "/r/package.json": "{ nope" }));
+  const on = (project, machine) => ({ ...project, on: machine });
+  const boxGood = on(good, "box");
+  assert.equal(lastValidProject(boxGood, on(bad, "box")), boxGood); // same path, same machine
+  assert.equal(lastValidProject(boxGood, on(bad, "other")), null); // same path, another machine
+  assert.equal(lastValidProject(boxGood, on(bad, null)), null); // remote, then this machine
+  assert.equal(lastValidProject(boxGood, bad), null); // `on` missing counts as this machine
+  const hereGood = on(good, null);
+  assert.equal(lastValidProject(hereGood, bad), hereGood); // null and missing are both this machine
+});
+
 test("staleNote puts the parse error first and says the view is the last valid one", () => {
   assert.equal(staleNote("go.mod line 7: x"), "go.mod line 7: x · showing the last valid version");
 });

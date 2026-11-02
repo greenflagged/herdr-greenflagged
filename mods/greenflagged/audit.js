@@ -103,12 +103,15 @@ export async function findManifest(cwd, home, read) {
   return null;
 }
 
-// A manifest being edited is often malformed for a moment. On a parse error the panel
-// keeps showing what it last showed for the same file, marked stale: this answers that
-// last valid project, or null when there is none (another file, or no valid read yet).
-// Held in memory by the panel only, so it ends with the project or the panel.
+// Returns the last valid project for the same file on the same machine as `failed`, or
+// null when there is none (a different file, another machine, or no valid read yet). A
+// manifest being edited is often malformed for a moment, so on a parse error the panel
+// keeps showing that last valid project, dimmed and marked stale. A project's machine is
+// its `on` (null for this one), which the panel sets after findManifest. The panel holds
+// it in memory only; it is lost when the project changes or the panel closes.
 export function lastValidProject(previous, failed) {
-  return previous && !previous.error && previous.path === failed?.path ? previous : null;
+  if (!previous || previous.error || !failed) return null;
+  return previous.path === failed.path && (previous.on ?? null) === (failed.on ?? null) ? previous : null;
 }
 export const staleNote = (error) => `${error} · showing the last valid version`;
 
