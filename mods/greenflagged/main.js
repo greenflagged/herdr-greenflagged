@@ -473,7 +473,7 @@ export default class Greenflagged extends View {
         .when(Boolean(this.project?.ecosystem.audited) && this.project.deps?.length > MAX_ENTRIES, (el) => el.child(
           div().text_size(11).text_color(t.ansi3).child(`Showing the first ${MAX_ENTRIES} dependencies.`)))
         .when(this.project?.skipped?.length > 0, (el) => el.child(
-          div().text_size(11).text_color(t.dim).child(`${this.project.skipped.length} local or git dependencies not checked.`)))
+          div().text_size(11).text_color(t.dim).child(`${this.project.skipped.length} local or git dependencies have no registry check.`)))
         .when(this.state === "error" && Boolean(this.list), (el) => el.child(
           div().text_size(11).text_color(t.ansi1).child(this.message))),
     ).child(this.body(t, list));

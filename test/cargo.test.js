@@ -271,6 +271,43 @@ test("cargoAllows reads Cargo's requirement forms", () => {
   for (const requirement of ["workspace", "", "1,", "^", null]) assert.equal(cargoAllows("1.0.0", requirement), null, String(requirement));
 });
 
+test("cargoAllows matches a pre-release version only against a pre-release of the same core", () => {
+  const cases = [
+    ["2.0.0-alpha", "2", false], ["2.0.0-alpha", "*", false], ["2.0.0-alpha", ">=1", false], ["2.0.0-alpha", "<2", false],
+    ["1.0.1-alpha", ">=1.0.0-alpha", false], ["2.0.0-alpha", "^2.0.0-alpha", true], ["2.0.0-beta", "^2.0.0-alpha", true],
+    ["2.0.0-alpha", "^2.0.0-beta", false], ["2.0.0-alpha.2", "^2.0.0-alpha.10", false], ["2.0.0-alpha.1", "^2.0.0-alpha", true],
+    ["2.0.0-rc.1", ">=2.0.0-alpha, <3", true], ["2.0.0-alpha", "=2.0.0-alpha", true], ["2.0.0-beta", "=2.0.0-alpha", false],
+    ["2.0.0", "^2.0.0-alpha", true], ["2.0.0", "<2.0.0-alpha", false], ["2.0.0", "2", true],
+  ];
+  for (const [version, requirement, want] of cases) assert.equal(cargoAllows(version, requirement), want, `${version} ${requirement}`);
+  for (const requirement of ["2.0-alpha", "2.*-alpha", "^2.0.0-al!pha", "^2.0.0-"]) assert.equal(cargoAllows("2.0.0-alpha", requirement), null, requirement);
+});
+
+test("cargoAllows ignores build metadata in the version and the requirement", () => {
+  const cases = [
+    ["1.0.0", "1.0.0+build", true], ["1.0.0+build.5", "=1.0.0", true], ["1.0.0+a", "=1.0.0+b", true],
+    ["1.0.1", "=1.0.0+build", false], ["2.0.0-alpha+build", "^2.0.0-alpha", true], ["2.0.0-alpha", "2.0.0-alpha+build", true],
+  ];
+  for (const [version, requirement, want] of cases) assert.equal(cargoAllows(version, requirement), want, `${version} ${requirement}`);
+});
+
+test("a path or git direct listed only by the lock keeps its dev flag and target marker", () => {
+  const project = parseCargoToml([
+    '[package]', 'name = "a"', 'version = "0.1.0"',
+    '[dev-dependencies]', 'gitdep = { git = "https://example.com/gitdep" }',
+    "[target.'cfg(windows)'.dependencies]", 'helper = { path = "helper" }',
+  ].join("\n"));
+  const text = [
+    '[[package]]', 'name = "a"', 'version = "0.1.0"', 'dependencies = ["gitdep", "helper"]',
+    '[[package]]', 'name = "gitdep"', 'version = "0.3.0"', 'source = "git+https://example.com/gitdep#abc"',
+    '[[package]]', 'name = "helper"', 'version = "0.2.0"',
+  ].join("\n");
+  assert.deepEqual(cargoResolver(text, project).direct, [
+    { name: "gitdep", constraint: null, dev: true, version: "0.3.0" },
+    { name: "helper", constraint: null, dev: false, marker: "cfg(windows)", version: "0.2.0" },
+  ]);
+});
+
 test("a root package that is also a workspace picks its own lock entry by name", async () => {
   const project = parseCargoToml([
     '[package]', 'name = "app"', '[workspace]', 'members = ["crates/x"]',

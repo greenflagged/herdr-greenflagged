@@ -12,7 +12,7 @@ Top to bottom, 320 px wide, on theme `surface`:
   (13 px semibold `foreground`, or "Dependencies" with no project) and a ↻ at the right (12 px `dim`).
 - **Counts**, 12 px: `N ok` in `ansi2`, `N attention` in `ansi3`, `N blocked` in `ansi1`.
 - **Notes**, 11 px, only when they apply: dependencies past the 500 cap, the number of local or git
-  dependencies not checked, and the last error while older results stay on screen. A manifest can
+  dependencies with no registry check, and the last error while older results stay on screen. A manifest can
   fail to parse while you edit it. When that happens, the panel keeps showing the last valid list or
   tree. That view must be of the same file on the same machine. The counts and rows are drawn in
   `dim`, so an old "all clear" can't read as current. The error shows in `ansi1` below the counts
@@ -122,7 +122,8 @@ Levels and labels come from the audit `status`:
 - `cargo.js`: pure logic, Rust's half of the tree: a `Cargo.toml` parser (dependency, build and dev
   tables, target tables with their cfg as the marker, `package` renames, `workspace = true`, virtual
   manifests) and `Cargo.lock` read into a package list. A v3 or v4 lock edge names a version only when two
-  versions of that crate are locked, and the project's own lock entry says which one a direct means.
+  versions of that crate are locked, and the project's own lock entry says which one a direct means
+  (without one, the highest locked version the direct's constraint allows).
   Its header lists the Rust edge cases.
 - `go.js`: pure logic, Go's half of the tree: `go.mod` read line by line into direct and indirect
   modules with `replace` applied. It runs nothing (no `go mod graph`) and reads no module cache, so

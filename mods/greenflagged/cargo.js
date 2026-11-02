@@ -118,42 +118,77 @@ export function cargoPackages(toml) {
 
 const NO_PACKAGES = "no [[package]] entries with a name and version";
 
-// A version's numeric core, [major, minor, patch]; pre-release and build are ignored.
-const versionParts = (text) => text.split(/[-+]/)[0].split(".").map((n) => Number.parseInt(n, 10));
+// A version or requirement operand split at its pre-release: "1.2.3-rc.1+build" →
+// { core: "1.2.3", pre: ["rc", "1"] }, pre null for a release. Build metadata after "+"
+// is dropped, on both sides, because Cargo ignores it when matching.
+const splitVersion = (text) => {
+  const noBuild = text.split("+")[0];
+  const dash = noBuild.indexOf("-");
+  return dash === -1 ? { core: noBuild, pre: null } : { core: noBuild.slice(0, dash), pre: noBuild.slice(dash + 1).split(".") };
+};
+const versionParts = (text) => splitVersion(text).core.split(".").map((n) => Number.parseInt(n, 10));
 const compare = (a, b) => {
   for (let i = 0; i < 3; i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) - (b[i] || 0);
   return 0;
 };
+// Semver's pre-release order: a release sorts after any pre-release of the same core;
+// numeric identifiers compare as numbers and sort before alphanumeric ones.
+const comparePre = (a, b) => {
+  if (!a || !b) return (a ? -1 : 0) - (b ? -1 : 0);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (a[i] === undefined) return -1;
+    if (b[i] === undefined) return 1;
+    if (a[i] === b[i]) continue;
+    const an = /^\d+$/.test(a[i]), bn = /^\d+$/.test(b[i]);
+    if (an && bn) return Number(a[i]) - Number(b[i]);
+    if (an !== bn) return an ? -1 : 1;
+    return a[i] < b[i] ? -1 : 1;
+  }
+  return 0;
+};
+const compareVersions = (a, b) => compare(versionParts(a), versionParts(b)) || comparePre(splitVersion(a).pre, splitVersion(b).pre);
 
 // Whether a locked version meets a Cargo requirement ("2", "^1.2", "~0.3", "=1.0.5",
-// ">=1, <3", "1.*", "*"). Answers null when it can't read the requirement.
+// ">=1, <3", "1.*", "*"). Answers null when it can't read the requirement. Build metadata
+// is ignored on both sides. As in Cargo, a pre-release version ("2.0.0-alpha") matches
+// only when some part of the requirement names a pre-release of the same major.minor.patch
+// ("^2.0.0-alpha"); pre-releases of one core are ordered by semver's rules, and a
+// pre-release in a requirement needs all three numbers and no wildcard.
 export function cargoAllows(version, requirement) {
   if (typeof version !== "string" || typeof requirement !== "string") return null;
+  const { pre: havePre } = splitVersion(version);
   const have = versionParts(version);
   if (have.some(Number.isNaN)) return null;
   const parts = requirement.split(",").map((p) => p.trim());
   if (!parts.length || parts.some((p) => !p)) return null;
+  let preAllowed = !havePre;
   for (const part of parts) {
     const [, op = "", rest] = /^(\^|~|=|>=|<=|>|<)?\s*(\S+)$/.exec(part) ?? [];
     if (rest === undefined) return null;
+    const { core, pre } = splitVersion(rest);
+    if (pre && pre.some((id) => !/^[0-9A-Za-z-]+$/.test(id))) return null;
+    const pieces = core.split(".");
     const given = [];
-    for (const piece of rest.split("-")[0].split(".")) {
+    for (const piece of pieces) {
       if (piece === "*" || piece === "x" || piece === "X") break;
       const n = Number.parseInt(piece, 10);
       if (Number.isNaN(n) || String(n) !== piece.replace(/^0+(?=\d)/, "")) return null;
       given.push(n);
     }
     if (given.length > 3) return null;
-    const wildcard = given.length < rest.split("-")[0].split(".").length;
+    const wildcard = given.length < pieces.length;
+    if (pre && (wildcard || given.length < 3)) return null;
     if (!given.length) { if (wildcard && !op) continue; return null; }
     const low = [given[0], given[1] ?? 0, given[2] ?? 0];
+    if (pre && compare(have, low) === 0) preAllowed = true;
     const bump = (i) => { const up = given.slice(0, i + 1); up[i] += 1; return [up[0], up[1] ?? 0, up[2] ?? 0]; };
-    const c = compare(have, low);
+    const c = compare(have, low) || comparePre(havePre, pre);
     let ok;
     if (op === ">") ok = c > 0;
     else if (op === ">=") ok = c >= 0;
     else if (op === "<") ok = c < 0;
     else if (op === "<=") ok = c <= 0;
+    else if (op === "=" && pre) ok = c === 0;
     else {
       let high;
       if (op === "~") high = bump(given.length > 1 ? 1 : 0);
@@ -163,13 +198,13 @@ export function cargoAllows(version, requirement) {
     }
     if (!ok) return false;
   }
-  return true;
+  return preAllowed;
 }
 
 // The highest of a crate's locked versions that the constraint allows, or undefined.
 function allowedVersion(versions, constraint) {
   const allowed = versions.filter((v) => cargoAllows(v, constraint) === true);
-  return allowed.sort((a, b) => compare(versionParts(b), versionParts(a)))[0];
+  return allowed.sort((a, b) => compareVersions(b, a))[0];
 }
 
 // Cargo.lock → { resolve, direct? }. For a package manifest, the project's own lock
