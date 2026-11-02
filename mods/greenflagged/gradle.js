@@ -9,7 +9,8 @@
 // from the build root `settings.gradle.kts` or `settings.gradle`,
 // `gradle/libs.versions.toml` (the version catalog, read with toml.js) and the root's own
 // `build.gradle.kts` or `build.gradle`; then `gradle.lockfile` beside the build file, as
-// the lockfile.
+// the lockfile. At the root, also each included module's `build.gradle.kts` or
+// `build.gradle` (GRADLE_MODULES, below).
 //
 // Performance: the tokenizer is one forward pass over charCodeAt with no regex over the
 // input and a 1 MiB cap (MAX_GRADLE_LENGTH); the matcher reads each token once, keeps
@@ -83,8 +84,14 @@
 // - A duplicate `g:a` keeps its first row.
 // - The root's build file lists the `include(…)` projects from settings as rows tagged
 //   `subproject`, after its own rows (one per string, `include(":a", ":b")` or Groovy
-//   `include ':a', ':b'`; `includeBuild` is not read). The counts line counts the
-//   subproject rows as directs.
+//   `include ':a', ':b'`; `includeBuild` is not read). findManifest then opens up to
+//   MAX_GRADLE_MODULES of them: `:a:b` is read from `<root>/a/b/build.gradle.kts` (or
+//   `.gradle`), and the row becomes a heading over that module's rows, `dev` moved into
+//   the tag, plus its `project(…)` links as `subproject` leaves. A heading isn't counted as
+//   a direct; what's under it counts toward the total. A module whose folder isn't plain
+//   (see gradleModuleFolder), whose build file is missing or unreadable, or past the cap
+//   stays a plain row, counted as a direct. A `projectDir` set in settings isn't read, and
+//   a module's own gradle.lockfile isn't either.
 // - Kotlin: the language is "Kotlin" when `plugins { }` holds `kotlin("…")`, an `id`
 //   starting `org.jetbrains.kotlin.` (or `kotlin`, `kotlin-android`, `kotlin-kapt`), or
 //   `alias(libs.plugins.x)` whose catalog id starts `org.jetbrains.kotlin.`; or when
@@ -746,8 +753,49 @@ export function gradleLockResolver(text, project) {
   }
   const direct = mergeDirect(project?.deps ?? [], rows);
   if (children.length) direct.push({ name: GRADLE_RESOLVED_GROUP, version: null, constraint: null, dev: false, group: true });
-  const resolve = (edge) => (edge.group === true ? { version: null, children } : null);
+  const resolve = (edge) => (edge.group === true && edge.name === GRADLE_RESOLVED_GROUP ? { version: null, children } : null);
   return { resolve, direct };
 }
 
 export const GRADLE_LOCKFILES = [{ file: "gradle.lockfile", resolver: gradleLockResolver }];
+
+// --- modules -----------------------------------------------------------------------
+
+export const MAX_GRADLE_MODULES = 100; // modules opened at the root; the rest stay plain rows
+
+// A settings include (`:a:b`, `app`) → its folder under the build root (`a/b`), or null
+// when a segment is anything but letters, digits, `.`, `_` and `-`, or is `.` or `..`.
+// Gradle's default project folder; a `projectDir` set in settings isn't read.
+export function gradleModuleFolder(include) {
+  if (typeof include !== "string") return null;
+  const segments = include.replace(/^:/, "").split(":");
+  for (const s of segments) if (!/^[A-Za-z0-9._-]+$/.test(s) || s === "." || s === "..") return null;
+  return segments.join("/");
+}
+
+// What findManifest needs to open a root's modules (see ECOSYSTEMS in audit.js).
+// `list` names the subproject rows to open and their folders; `parse` turns one module's
+// build file into the edges under its heading row, or null when it has none.
+export const GRADLE_MODULES = {
+  files: ["build.gradle.kts", "build.gradle"],
+  list(project) {
+    const modules = [];
+    for (const dep of project.deps ?? []) {
+      if (dep.marker !== "subproject" || modules.length >= MAX_GRADLE_MODULES) continue;
+      const folder = gradleModuleFolder(dep.name);
+      if (folder) modules.push({ name: dep.name, folder });
+    }
+    return modules;
+  },
+  parse(text, file, context) {
+    const result = parseGradle(text, context, file);
+    if (result.error) return null;
+    const edges = result.deps.map(({ name, constraint, dev, marker }) => {
+      const tag = [marker, dev ? "dev" : null].filter(Boolean).join(" · ");
+      return { name, constraint, ...(tag ? { marker: tag } : {}) };
+    });
+    // Links to other modules, as `project(":x")` or `projects.x`, show as leaves.
+    for (const name of result.skipped) if (name.startsWith(":") || name.startsWith("projects.")) edges.push({ name, marker: "subproject" });
+    return edges;
+  },
+};

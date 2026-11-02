@@ -15,7 +15,8 @@
 // marker are one edge, and it keeps the first non-null marker too.
 //
 // A direct with `group: true` is a heading over its edges, not a package (Go's
-// "indirect" row): resolve answers its children, and it is keyed by groupKey(name), which
+// "indirect" row): resolve answers its children (or the row's own `members` edges, when
+// treeForProject builds it), and it is keyed by groupKey(name), which
 // no package key can equal. It sorts after the packages, is never `dev`, and isn't
 // counted in "N direct, M total", though the packages under it are. `directRoots` is the
 // one place that leaves groups out of the directs. Only a direct may be a group.
@@ -286,19 +287,28 @@ export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_N
       else note = failedNote(lock.file, "its resolver returned nothing");
     } catch (error) { note = failedNote(lock.file, error); }
   }
+  resolver = withMembers(resolver);
   let tree;
   try {
     // `made` may be a bare resolve function, whose `.direct` is undefined.
     tree = await buildTree(made?.direct ?? project.deps, resolver, { pause });
   } catch (error) {
     note = failedNote(lock?.file, error);
-    tree = await buildTree(project.deps, () => null);
+    tree = await buildTree(project.deps, withMembers(() => null));
   }
   if (stale()) return null;
   tree.note = note;
   tree.lockFile = lock?.file ?? null;
   try { await expandPaths(tree, expanded); } catch (error) { tree.note ??= failedNote(tree.lockFile, error); }
   return tree;
+}
+
+// A heading row that carries its own children (`members`, as a Gradle root's modules
+// do) answers them itself; every other edge goes to the lockfile's resolver.
+function withMembers(resolver) {
+  const base = typeof resolver === "function" ? resolver : resolver.resolve;
+  const resolve = (edge) => (edge.group === true && Array.isArray(edge.members) ? { version: null, children: edge.members } : base(edge));
+  return typeof resolver === "function" ? resolve : { ...resolver, resolve };
 }
 
 // A resolver over a lockfile's package list, for any language whose lock names each

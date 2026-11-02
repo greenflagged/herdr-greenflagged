@@ -2,7 +2,7 @@
 // can run it under Node without the app.
 
 import { GO_LOCKFILES, GO_NOTE, parseGoMod } from "./go.js";
-import { GRADLE_COMPANIONS, GRADLE_LOCKFILES, GRADLE_NOTE, parseGradleGroovy, parseGradleKts } from "./gradle.js";
+import { GRADLE_COMPANIONS, GRADLE_LOCKFILES, GRADLE_MODULES, GRADLE_NOTE, parseGradleGroovy, parseGradleKts } from "./gradle.js";
 import { MAVEN_NOTE, parsePom } from "./maven.js";
 import { PYTHON_LOCKFILES, PYTHON_NOTE, parsePyproject, parseRequirements } from "./python.js";
 
@@ -73,14 +73,22 @@ const LABELS = {
 //                   `project.root`, which the panel watches. A project from an entry
 //                   without companions has `root` equal to `folder`.
 //   note         -> shown instead of the no-lockfile sentence
+//   modules      -> { files: [names], list(project) -> [{ name, folder }], parse(text, file, context) -> edges | null },
+//                   a multi-module build's members, opened only when the manifest is the
+//                   build root's. `list` picks dep rows and a folder relative to the root
+//                   for each; findManifest reads the first of `files` there and turns the
+//                   row into a `group: true` heading whose `members` are `parse`'s edges.
+//                   A module with no build file, or one `parse` refuses, stays a plain row.
 // Parsers never get a file reader: every file the panel can read is a static name on an
-// entry (`file`, `lockfiles`, `companions`), so the README's list of files read is
-// complete by construction, and a hostile manifest can't widen it.
+// entry (`file`, `lockfiles`, `companions`, `modules.files`), so the README's list of
+// files read is complete by construction. The one folder a manifest chooses is a
+// module's, and gradleModuleFolder (gradle.js) keeps it under the build root: plain
+// folder names only, never `..`, at most MAX_GRADLE_MODULES of them.
 // Both Python entries share one base, so their lockfiles and note can't drift apart, and
 // so do the three Java/Kotlin entries.
 const PYTHON = { id: "pypi", name: "Python", audited: false, lockfiles: PYTHON_LOCKFILES, note: PYTHON_NOTE };
 const MAVEN = { id: "maven", name: "Java/Kotlin", audited: false };
-const GRADLE = { ...MAVEN, lockfiles: GRADLE_LOCKFILES, companions: GRADLE_COMPANIONS, note: GRADLE_NOTE };
+const GRADLE = { ...MAVEN, lockfiles: GRADLE_LOCKFILES, companions: GRADLE_COMPANIONS, modules: GRADLE_MODULES, note: GRADLE_NOTE };
 export const ECOSYSTEMS = [
   { id: "npm", name: "npm", file: "package.json", audited: true, parse: parsePackageJson },
   { ...PYTHON, file: "pyproject.toml", parse: parsePyproject },
@@ -123,6 +131,9 @@ export async function findManifest(cwd, home, read) {
       const ecosystem = tier[i], path = `${folder}/${ecosystem.file}`;
       const { root, files } = await readCompanions(ecosystem.companions, folder, home, read);
       const project = { folder, path, root, ecosystem, ...parseSafely(ecosystem, texts[i], { files, root, folder }) };
+      if (ecosystem.modules && root === folder && Array.isArray(project.deps)) {
+        project.deps = await openModules(ecosystem.modules, project, files, read);
+      }
       // A pyproject.toml with no dependency tables declares them elsewhere; a
       // requirements.txt beside it is the next best source, under the pyproject's name.
       const j = project.undeclared ? tier.findIndex((e, k) => k > i && e.id === ecosystem.id && texts[k] !== null) : -1;
@@ -132,6 +143,27 @@ export async function findManifest(cwd, home, read) {
     }
   }
   return null;
+}
+
+// A root's module rows → heading rows over each module's own dependencies (see
+// `modules` on ECOSYSTEMS). Modules are read in parallel; within one, the first of
+// `files` that exists wins. A parser that throws leaves the row as it was.
+async function openModules(modules, project, files, read) {
+  const opened = new Map(await Promise.all(modules.list(project).map(async ({ name, folder }) => {
+    const moduleFolder = `${project.root}/${folder}`;
+    for (const file of modules.files) {
+      const text = await read(`${moduleFolder}/${file}`);
+      if (text === null) continue;
+      let edges = null;
+      try { edges = modules.parse(text, file, { files, root: project.root, folder: moduleFolder }); } catch { edges = null; }
+      return [name, edges];
+    }
+    return [name, null];
+  })));
+  return project.deps.map((dep) => {
+    const edges = opened.get(dep.name);
+    return edges ? { name: dep.name, version: null, constraint: null, dev: false, group: true, members: edges } : dep;
+  });
 }
 
 // An entry's companions (see ECOSYSTEMS) → { root, files }. Without companions the

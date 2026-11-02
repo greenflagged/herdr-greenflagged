@@ -3,9 +3,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { ECOSYSTEMS } from "../mods/greenflagged/audit.js";
+import { ECOSYSTEMS, findManifest } from "../mods/greenflagged/audit.js";
 import {
-  GRADLE_COMPANIONS, GRADLE_LOCKFILES, GRADLE_NOTE, GRADLE_RESOLVED_GROUP, MAX_GRADLE_LENGTH, gradleLockResolver, isConfiguration, parseGradle,
+  GRADLE_COMPANIONS, GRADLE_LOCKFILES, GRADLE_MODULES, GRADLE_NOTE, GRADLE_RESOLVED_GROUP, MAX_GRADLE_LENGTH, MAX_GRADLE_MODULES,
+  gradleLockResolver, gradleModuleFolder, isConfiguration, parseGradle,
   readGradleLock, readSettings, readVersionCatalog,
 } from "../mods/greenflagged/gradle.js";
 import { countsLine, directRoots, expandNode, groupKey, pathOf, treeForProject, visibleRows } from "../mods/greenflagged/tree.js";
@@ -489,4 +490,104 @@ test("deep nesting doesn't make the scan quadratic", () => {
   const start = performance.now();
   assert.deepEqual(parseGradle(text).deps, []);
   assert.ok(performance.now() - start < 500, `took ${(performance.now() - start).toFixed(0)} ms`);
+});
+
+// --- a root's modules --------------------------------------------------------------------
+
+test("gradleModuleFolder maps an include to a plain folder under the root, or refuses it", () => {
+  assert.equal(gradleModuleFolder(":app"), "app");
+  assert.equal(gradleModuleFolder("app"), "app");
+  assert.equal(gradleModuleFolder(":libs:core-ui"), "libs/core-ui");
+  assert.equal(gradleModuleFolder(":a.b_c"), "a.b_c");
+  for (const bad of [":..", "..", ":.", ":a:..:b", ":a/b", "/etc", ":a b", ":", "", "::a", ":~", null, 42]) {
+    assert.equal(gradleModuleFolder(bad), null, String(bad));
+  }
+});
+
+const MODULE_ROOT = {
+  "/w/r/settings.gradle.kts": 'rootProject.name = "big"\ninclude(":app", ":lib", ":nobuild", ":..")',
+  "/w/r/build.gradle.kts": 'subprojects {\n dependencies { testImplementation(kotlin("test")) }\n dependencyManagement { dependencies { dependency("p:pinned:7") } }\n}\ndependencies { implementation("root:own:1") }',
+  "/w/r/app/build.gradle.kts": 'dependencies {\n implementation(project(":lib"))\n implementation("p:pinned")\n testImplementation("t:x:2")\n implementation(files("x.jar"))\n}',
+  "/w/r/lib/build.gradle": "dependencies {\n api 'g:lib:3'\n}",
+};
+const moduleReader = (tree) => {
+  const seen = [];
+  return { seen, read: async (path) => { seen.push(path); return tree[path] ?? null; } };
+};
+
+test("a root opens each module into a heading over its own dependencies", async () => {
+  const { seen, read } = moduleReader(MODULE_ROOT);
+  const project = await findManifest("/w/r", "/w", read);
+  assert.deepEqual(project.deps.map((d) => [d.name, d.group === true]), [
+    ["org.jetbrains.kotlin:kotlin-test", false], ["root:own", false],
+    [":app", true], [":lib", true], [":nobuild", false], [":..", false],
+  ]);
+  assert.deepEqual(project.deps[2].members, [
+    { name: "p:pinned", constraint: "7" },
+    { name: "t:x", constraint: "2", marker: "dev" },
+    { name: "org.jetbrains.kotlin:kotlin-test", constraint: "managed", marker: "every module · dev" },
+    { name: ":lib", marker: "subproject" },
+  ]);
+  assert.deepEqual(project.deps[3].members, [
+    { name: "g:lib", constraint: "3" },
+    { name: "org.jetbrains.kotlin:kotlin-test", constraint: "managed", marker: "every module · dev" },
+  ]);
+  // Only the modules' own folders are read, kts first, and never anything outside the root.
+  const moduleReads = seen.filter((p) => /\/w\/r\/[^/]+\/build\.gradle/.test(p) || p.includes(".."));
+  assert.deepEqual(moduleReads, [
+    "/w/r/app/build.gradle.kts", "/w/r/lib/build.gradle.kts", "/w/r/nobuild/build.gradle.kts",
+    "/w/r/lib/build.gradle", "/w/r/nobuild/build.gradle",
+  ]);
+});
+
+test("the tree shows modules as headings that open to their rows, and counts what's under them", async () => {
+  const project = await findManifest("/w/r", "/w", moduleReader(MODULE_ROOT).read);
+  const tree = await treeForProject(project, null, { noLockNote: GRADLE_NOTE });
+  assert.deepEqual(directRoots(tree).map((n) => n.name), [":..", ":nobuild", "org.jetbrains.kotlin:kotlin-test", "root:own"]);
+  const app = tree.roots.find((n) => n.name === ":app");
+  assert.equal(app.key, groupKey(":app"));
+  await expandNode(tree, app, [app.key]);
+  assert.deepEqual(app.children.map((n) => [n.name, n.constraint ?? null, n.marker ?? null]), [
+    [":lib", null, "subproject"],
+    ["org.jetbrains.kotlin:kotlin-test", "managed", "every module · dev"],
+    ["p:pinned", "7", null],
+    ["t:x", "2", "dev"],
+  ]);
+  assert.equal(countsLine(tree), "4 direct, 8 total");
+});
+
+test("a module's build file that can't be read leaves its row plain; a module view opens nothing", async () => {
+  const tree = { ...MODULE_ROOT, "/w/r/app/build.gradle.kts": 'dependencies { implementation("never closed }' };
+  const project = await findManifest("/w/r", "/w", moduleReader(tree).read);
+  assert.equal(project.deps.find((d) => d.name === ":app").group, undefined);
+  const { seen, read } = moduleReader(MODULE_ROOT);
+  const app = await findManifest("/w/r/app", "/w", read);
+  assert.ok(!app.deps.some((d) => d.group));
+  assert.ok(!seen.includes("/w/r/lib/build.gradle.kts"));
+});
+
+test("at most MAX_GRADLE_MODULES modules are opened", async () => {
+  const tree = { "/w/r/settings.gradle": Array.from({ length: MAX_GRADLE_MODULES + 5 }, (_, i) => `include ':m${i}'`).join("\n"), "/w/r/build.gradle": "" };
+  for (let i = 0; i < MAX_GRADLE_MODULES + 5; i++) tree[`/w/r/m${i}/build.gradle`] = "dependencies { implementation 'a:b:1' }";
+  const project = await findManifest("/w/r", "/w", moduleReader(tree).read);
+  assert.equal(project.deps.filter((d) => d.group).length, MAX_GRADLE_MODULES);
+  assert.equal(project.deps.length, MAX_GRADLE_MODULES + 5);
+});
+
+test("with a lockfile, the modules still open and the resolved group keeps its own rows", async () => {
+  const project = await findManifest("/w/r", "/w", moduleReader(MODULE_ROOT).read);
+  const lock = { ...GRADLE_LOCKFILES[0], text: "root:own:1=compileClasspath\nz:extra:5=runtimeClasspath\n" };
+  const tree = await treeForProject(project, lock, { noLockNote: GRADLE_NOTE });
+  const lib = tree.roots.find((n) => n.name === ":lib");
+  await expandNode(tree, lib, [lib.key]);
+  assert.deepEqual(lib.children.map((n) => n.name), ["g:lib", "org.jetbrains.kotlin:kotlin-test"]);
+  const resolved = tree.roots.find((n) => n.name === GRADLE_RESOLVED_GROUP);
+  await expandNode(tree, resolved, [resolved.key]);
+  assert.deepEqual(resolved.children.map((n) => n.name), ["z:extra"]);
+});
+
+test("GRADLE_MODULES.list skips rows that aren't subprojects and folders that aren't plain", () => {
+  const deps = [{ name: ":a", marker: "subproject" }, { name: "g:a", marker: null }, { name: ":../x", marker: "subproject" }];
+  assert.deepEqual(GRADLE_MODULES.list({ deps }), [{ name: ":a", folder: "a" }]);
+  assert.equal(GRADLE_MODULES.parse("dependencies { implementation(\"x }", "build.gradle.kts", {}), null);
 });

@@ -227,7 +227,9 @@ Levels and labels come from the audit `status`:
   dependencies with `dev`, `provided` and `runtime` tags, and the yellow Maven sentence. A Kotlin Gradle
   project shows "Not checked: Kotlin", its catalog dependencies resolved, the root project's name from
   the root folder and the subproject's folder name from a subproject folder, where the catalog still
-  resolves. The root lists its subprojects after its own rows; a `subprojects { }` dependency is tagged
+  resolves. The root lists its subprojects after its own rows, each as a `▸` row that opens to that
+  module's own dependencies (read from its build file) and its links to other modules, and the
+  counts line adds what's under them to the total; a `subprojects { }` dependency is tagged
   `every module` at the root and shows in each module too, and a version pinned by
   `dependencyManagement { }` or `constraints { }` replaces `managed`.
 - A repo with both `package.json` and `pyproject.toml` still gets the npm audit.
