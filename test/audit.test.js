@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
-  AUDIT_TTL_MS, ECOSYSTEMS, NPM_NOTE, REFUSED_NOTE, auditOutcome, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc, lastValidProject, staleNote, staleState, screenAfterOutcome,
+  AUDIT_TTL_MS, ECOSYSTEMS, NPM_NOTE, REFUSED_NOTE, auditOutcome, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc, lastValidProject, staleNote, staleState, screenAfterOutcome, screenAfterError,
 } from "../mods/greenflagged/audit.js";
 import { countsLine, treeForProject } from "../mods/greenflagged/tree.js";
 
@@ -586,6 +586,19 @@ test("the tree outcome keeps the tree and drops the list; the audit outcome leav
   const tree = { roots: [] }, list = [{ name: "a" }];
   assert.deepEqual(screenAfterOutcome(auditOutcome(null), { list, tree, treeSource: "s" }), { list: null, tree, treeSource: "s" });
   assert.deepEqual(screenAfterOutcome(auditOutcome("gflag_x", 200), { list, tree, treeSource: "s" }), { list, tree, treeSource: "s" });
+});
+
+test("a thrown request after sign-out drops the tree, so a mid-edit shows no sign-in line", () => {
+  const signedOut = { list: null, tree: { roots: [] }, treeSource: "s" };
+  const afterThrow = screenAfterError(signedOut);
+  assert.deepEqual(afterThrow, { list: null, tree: null, treeSource: null });
+  assert.equal(staleState(afterThrow, true), null);
+});
+
+test("an error keeps the last list on screen", () => {
+  const list = [{ name: "a" }];
+  assert.deepEqual(screenAfterError({ list, tree: null, treeSource: null }), { list, tree: null, treeSource: null });
+  assert.equal(staleState(screenAfterError({ list }), true), "error");
 });
 
 test("staleState follows what is on screen", () => {

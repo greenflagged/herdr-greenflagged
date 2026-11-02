@@ -2,7 +2,7 @@
 
 A dependency tree viewer for Herdr. It follows the terminal you're working in and shows the project's dependency tree for npm, Python, Rust, Go, Java and Kotlin, read from its manifest and lockfile. It needs no account. Greenflagged's checks are the extra layer: signed in, an npm (JavaScript) project's rows become verdicts, so the panel spots rejected and unreviewed dependencies as your agent works and shows what to use instead. [Greenflagged](https://greenflagged.dev) is a private npm registry that scans and reviews every package it serves. It is free for personal use.
 
-![Panel for the Rust workspace ripgrep reading "Rust: no Greenflagged checks yet", "10 projects, 60 total" and "9 local or git dependencies have no registry check", with an open ripgrep (workspace) row over its ten crates, from globset 0.4.21 to ripgrep 15.2.0](preview.png)
+![Two panels split by a diagonal line. Left, captioned "npm, checked by Greenflagged": the npm project got reading "43 ok", "1 attention" and "1 blocked", with request (dev) rejected and "rejected by review Use @cypress/request instead.", tsx (dev) marked "older version only" with "Only older versions are greenflagged. Pin 4.23.14.", and a folded "43 greenflagged" row. Right, captioned "Any language": the Rust workspace ripgrep reading "Rust: no Greenflagged checks yet", "10 projects, 60 total" and "9 local or git dependencies have no registry check", with an open ripgrep (workspace) row over its ten crates, from globset 0.4.21 to ripgrep 15.2.0](preview.png)
 
 ## What you see
 
@@ -273,9 +273,12 @@ Levels and labels come from the audit `status`:
   (BurntSushi/ripgrep at 91f5d22, on 2026-11-02) it shows "10 projects, 60 total" under an open
   "ripgrep (workspace)" row over its ten crates. In `crates/ignore` it shows "10 direct, 30 total" with
   versions, `crossbeam-channel` tagged `dev`, `winapi-util` tagged `cfg(windows)`, and the sibling crate
-  as `globset 0.4.21 (project)`, which expands to globset's own dependencies, and no no-lockfile note. Saving a member's
+  as `globset 0.4.21 (project)`, and no no-lockfile note. Saving a member's
   `Cargo.toml` rebuilds the tree. With `Cargo.lock` moved away and ↻ clicked, the workspace row and its
   crates still show, at manifest versions, with the no-lockfile note.
+- Signed in, on sindresorhus/got at 6b5aafc (2026-11-02), the panel shows "43 ok", "1 attention" and
+  "1 blocked": `request` (dev) rejected with "Use @cypress/request instead.", `tsx` (dev) marked
+  "older version only" with "Pin 4.23.14.", and the rest folded behind "43 greenflagged".
 - Flipping between two projects inside 5 minutes sends one audit for each, not one per switch.
 - `›` gives a rail with the right counts, and `‹` restores the width, including after a restart.
 - `↗` opens a window that survives a restart, on the same project if frozen, and `↙` brings the panel back.

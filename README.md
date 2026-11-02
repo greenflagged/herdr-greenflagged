@@ -28,9 +28,10 @@ live.
 
 ## What it looks like
 
-At the root of a Rust workspace, the panel shows the workspace with its crates under it:
+Signed in, on the npm project got (left), and at the root of the Rust workspace ripgrep, with its
+crates under it (right):
 
-![Panel for the Rust workspace ripgrep reading "Rust: no Greenflagged checks yet", "10 projects, 60 total" and "9 local or git dependencies have no registry check", with an open ripgrep (workspace) row over its ten crates, from globset 0.4.21 to ripgrep 15.2.0](preview.png)
+![Two panels split by a diagonal line. Left, captioned "npm, checked by Greenflagged": the npm project got reading "43 ok", "1 attention" and "1 blocked", with request (dev) rejected and "rejected by review Use @cypress/request instead.", tsx (dev) marked "older version only" with "Only older versions are greenflagged. Pin 4.23.14.", and a folded "43 greenflagged" row. Right, captioned "Any language": the Rust workspace ripgrep reading "Rust: no Greenflagged checks yet", "10 projects, 60 total" and "9 local or git dependencies have no registry check", with an open ripgrep (workspace) row over its ten crates, from globset 0.4.21 to ripgrep 15.2.0](preview.png)
 
 In one crate of that workspace, with a sibling crate as a `(project)` row:
 

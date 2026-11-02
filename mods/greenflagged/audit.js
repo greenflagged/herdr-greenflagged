@@ -240,8 +240,14 @@ export function staleState({ list, tree }, audited) {
 // tree, so a mid-edit after it doesn't pick the signed-out view for a panel holding a token.
 export function screenAfterOutcome(outcome, { list, tree, treeSource }) {
   if (outcome.view === "tree") return { list: null, tree, treeSource };
-  if (outcome.view === "error") return { list, tree: null, treeSource: null };
+  if (outcome.view === "error") return screenAfterError({ list });
   return { list, tree, treeSource };
+}
+
+// What stays on screen after any error, an error answer or a thrown request alike: the
+// list, never a tree.
+export function screenAfterError({ list }) {
+  return { list, tree: null, treeSource: null };
 }
 
 // A parser should answer { error } on bad input; one that throws gets the same

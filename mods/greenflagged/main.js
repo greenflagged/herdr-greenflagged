@@ -5,7 +5,7 @@ import {
 } from "herdr";
 import {
   MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditOutcome, auditRequest, cachedAudit, findBlock, findManifest, lastValidProject, packageUrl, parentFolders,
-  parseToolResponse, rememberRequest, requestCall, rows, screenAfterOutcome, staleNote, staleState, storeAudit, summarize, tokenFromNpmrc, withRequests,
+  parseToolResponse, rememberRequest, requestCall, rows, screenAfterError, screenAfterOutcome, staleNote, staleState, storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
 import { countsLine, expandNode, failedNote, topLevel, treeForProject, visibleRows } from "./tree.js";
 
@@ -230,6 +230,7 @@ export default class Greenflagged extends View {
         this.tree = null; this.treeSource = null;
         settle("ready");
       } catch (error) {
+        if (run === this.run) Object.assign(this, screenAfterError(this));
         settle("error", String(error?.message ?? error));
       }
     });
