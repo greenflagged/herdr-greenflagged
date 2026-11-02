@@ -14,6 +14,9 @@ export const AUDIT_TTL_MS = 5 * 60 * 1000;
 const MAX_CACHED_AUDITS = 20;
 export const SIGN_IN_COMMAND = ["npm", "login", "--registry=https://greenflagged.dev/npm/"];
 const MAX_PARENTS = 12;
+export const REFUSED_NOTE = "Greenflagged refused the token.";
+// npm has no lockfile reader, so a signed-out npm tree is its direct dependencies.
+export const NPM_NOTE = "Only direct dependencies are shown; npm lockfiles aren't read.";
 
 // A row's level, worst first. `pending` and `not_imported` are not bad news about
 // the package: nobody has finished reviewing it.
@@ -41,7 +44,8 @@ const LABELS = {
 // The manifest names to look for. An audited entry reads its file into the rows
 // shape below. An unaudited one only names the language, so the panel can say it
 // can't check it rather than that there is nothing to check. PyPI checks are still
-// off on the registry, so Python is unaudited for now.
+// off on the registry, so Python is unaudited for now. With no token, or a refused one,
+// an audited entry is drawn as a plain tree too, from its parse and its `note`.
 //
 // An unaudited entry gains a dependency tree by carrying these optional fields,
 // each exported from one module per language (python.js, go.js, maven.js, gradle.js),
@@ -102,7 +106,7 @@ const PYTHON = { id: "pypi", name: "Python", audited: false, lockfiles: PYTHON_L
 const MAVEN = { id: "maven", name: "Java/Kotlin", audited: false };
 const GRADLE = { ...MAVEN, lockfiles: GRADLE_LOCKFILES, companions: GRADLE_COMPANIONS, modules: GRADLE_MODULES, note: GRADLE_NOTE };
 export const ECOSYSTEMS = [
-  { id: "npm", name: "npm", file: "package.json", audited: true, parse: parsePackageJson },
+  { id: "npm", name: "npm", file: "package.json", audited: true, parse: parsePackageJson, note: NPM_NOTE },
   { ...PYTHON, file: "pyproject.toml", parse: parsePyproject },
   { ...PYTHON, file: "requirements.txt", parse: parseRequirements },
   { id: "cargo", name: "Rust", file: "Cargo.toml", audited: false, parse: parseCargoToml, lockfiles: CARGO_LOCKFILES, note: CARGO_NOTE,
@@ -117,6 +121,16 @@ export const ECOSYSTEMS = [
 export const WATCHED_FILES = [...new Set(ECOSYSTEMS.flatMap((e) => [
   e.file, ...(e.lockfiles ?? []).map((l) => l.file), ...(e.companions?.root ?? []), ...(e.companions?.files ?? []),
 ]))];
+
+// An audited project's view once the token is known and, with a token, the audit has
+// answered: the audit's rows, the plain tree (no token, or a refused one, which the
+// panel then forgets), or an error. `status` is the audit's HTTP status, if it was sent.
+export function auditOutcome(token, status) {
+  if (!token) return { view: "tree", message: null, forget: false };
+  if (status === 401 || status === 403) return { view: "tree", message: REFUSED_NOTE, forget: true };
+  if (status !== 200) return { view: "error", message: `Greenflagged answered ${status}.`, forget: false };
+  return { view: "audit", message: null, forget: false };
+}
 
 // Folders to try from `cwd` upward, stopping after `home` when it is an ancestor.
 export function parentFolders(cwd, home) {
