@@ -484,7 +484,7 @@ export default class Greenflagged extends View {
           .child(pill(counts.attention, this.stale ? t.dim : t.ansi3, "attention"))
           .child(pill(counts.blocked, this.stale ? t.dim : t.ansi1, "blocked"))))
         .when(this.state === "unsupported" && Boolean(this.project), (el) => el.child(
-          div().text_size(12).text_color(t.muted).child(`Not checked: ${this.project.language ?? this.project.ecosystem.name}`)))
+          div().text_size(12).text_color(t.muted).child(`${this.project.language ?? this.project.ecosystem.name}: no Greenflagged checks yet`)))
         .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(
           div().text_size(12).text_color(t.dim).child(countsLine(this.tree))))
         .when(this.state === "unsupported" && Boolean(this.message), (el) => el.child(

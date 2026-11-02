@@ -55,8 +55,8 @@ Levels and labels come from the audit `status`:
   `settings.gradle.kts` or `settings.gradle`, found from the build file's folder upward, stopping
   before home unless the build file is in home itself. With `gradle.lockfile` beside the build file, the locked versions fill the rows and the other
   locked entries sit under a collapsed "resolved" row; without one, a sentence says the full tree needs
-  `gradle dependencies` (`gradle.js`'s header lists the edge cases). The header reads "Not checked:
-  Kotlin" when the build applies a Kotlin plugin, else "Not checked: Java/Kotlin". A `pyproject.toml` with no dependency
+  `gradle dependencies` (`gradle.js`'s header lists the edge cases). The header reads "Kotlin: no
+  Greenflagged checks yet" when the build applies a Kotlin plugin, else "Java/Kotlin: no Greenflagged checks yet". A `pyproject.toml` with no dependency
   tables at all (`dynamic = ["dependencies"]`) gives way to a `requirements.txt` beside it.
 - It audits on ↻, every 15 minutes, and when a project or its dependencies change, unless that exact
   project and dependency list was audited in the last 5 minutes. Saving with the same dependencies or
@@ -249,13 +249,13 @@ Levels and labels come from the audit `status`:
 - With no token, the panel shows Sign in with npm and sends no request. Finishing the login in the tab it
   opens fills the panel in without clicking ↻.
 - A folder with no `package.json` shows "No package.json in this folder or above it."
-- A Go repo shows "Not checked: Go" in the header and sends no request. Its tree lists the direct modules
+- A Go repo shows "Go: no Greenflagged checks yet" in the header and sends no request. Its tree lists the direct modules
   from `go.mod` with versions, then a dim `▸ indirect` row that opens to the `// indirect` modules, with
   no yellow note: `github.com/brizzai/fleet` (11 direct, 28 indirect) reads "11 direct, 39 total", and
   the rail shows `11`.
-- A Maven project shows "Not checked: Java/Kotlin" (or "Kotlin" with `kotlin-maven-plugin`), its direct
+- A Maven project shows "Java/Kotlin: no Greenflagged checks yet" (or "Kotlin" with `kotlin-maven-plugin`), its direct
   dependencies with `dev`, `provided` and `runtime` tags, and the yellow Maven sentence. A Kotlin Gradle
-  project shows "Not checked: Kotlin", its catalog dependencies resolved, the root project's name from
+  project shows "Kotlin: no Greenflagged checks yet", its catalog dependencies resolved, the root project's name from
   the root folder and the subproject's folder name from a subproject folder, where the catalog still
   resolves. The root lists its subprojects after its own rows, each as a `▸` row that opens to that
   module's own dependencies (read from its build file) and its links to other modules, and the
