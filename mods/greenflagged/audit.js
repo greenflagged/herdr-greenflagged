@@ -1,6 +1,8 @@
 // Everything here is plain data in and out, with no Herdr imports, so `npm test`
 // can run it under Node without the app.
 
+import { PYTHON_LOCKFILES, PYTHON_NOTE, parsePyproject, parseRequirements } from "./python.js";
+
 export const MCP_URL = "https://greenflagged.dev/mcp";
 export const packageUrl = (name) => `https://greenflagged.dev/packages/npm/${name}`;
 export const MAX_ENTRIES = 500; // audit_manifest's own cap
@@ -36,13 +38,29 @@ const LABELS = {
 // shape below. An unaudited one only names the language, so the panel can say it
 // can't check it rather than that there is nothing to check. PyPI checks are still
 // off on the registry, so Python is unaudited for now.
+//
+// An unaudited entry gains a dependency tree by carrying these optional fields,
+// each exported from one module per language (python.js, cargo.js, go.js), so this
+// list stays the only registry:
+//   parse(text)  -> { name, deps: [{ name, constraint, dev, extras?, marker? }], skipped?, undeclared? }
+//                   | { error }; `undeclared: true` means the file has no dependency tables
+//                   at all, and findManifest then tries a later manifest of the same id
+//   lockfiles    -> [{ file, resolver(text, project) -> { resolve, count?, direct? } | { error } }], tried
+//                   in order in the manifest's folder; `resolve` is the contract in tree.js, and
+//                   `direct` replaces the manifest's directs when the lock records the project
+//   note         -> shown instead of the no-lockfile sentence
+// Both Python entries share one base, so their lockfiles and note can't drift apart.
+const PYTHON = { id: "pypi", name: "Python", audited: false, lockfiles: PYTHON_LOCKFILES, note: PYTHON_NOTE };
 export const ECOSYSTEMS = [
   { id: "npm", name: "npm", file: "package.json", audited: true, parse: parsePackageJson },
-  { id: "pypi", name: "Python", file: "pyproject.toml", audited: false },
-  { id: "pypi", name: "Python", file: "requirements.txt", audited: false },
+  { ...PYTHON, file: "pyproject.toml", parse: parsePyproject },
+  { ...PYTHON, file: "requirements.txt", parse: parseRequirements },
   { id: "cargo", name: "Rust", file: "Cargo.toml", audited: false },
   { id: "go", name: "Go", file: "go.mod", audited: false },
 ];
+
+// Files whose change means the panel should look again: manifests and lockfiles.
+export const WATCHED_FILES = [...new Set(ECOSYSTEMS.flatMap((e) => [e.file, ...(e.lockfiles ?? []).map((l) => l.file)]))];
 
 // Folders to try from `cwd` upward, stopping after `home` when it is an ancestor.
 export function parentFolders(cwd, home) {
@@ -68,10 +86,28 @@ export async function findManifest(cwd, home, read) {
       const i = texts.findIndex((text) => text !== null);
       if (i === -1) continue;
       const ecosystem = tier[i], path = `${folder}/${ecosystem.file}`;
-      return ecosystem.audited ? { folder, path, ecosystem, ...ecosystem.parse(texts[i]) } : { folder, path, ecosystem };
+      const project = { folder, path, ecosystem, ...parseSafely(ecosystem, texts[i]) };
+      // A pyproject.toml with no dependency tables declares them elsewhere; a
+      // requirements.txt beside it is the next best source, under the pyproject's name.
+      const j = project.undeclared ? tier.findIndex((e, k) => k > i && e.id === ecosystem.id && texts[k] !== null) : -1;
+      if (j === -1) return project;
+      const fallback = { folder, path: `${folder}/${tier[j].file}`, ecosystem: tier[j], ...parseSafely(tier[j], texts[j]) };
+      return { ...fallback, name: fallback.name ?? project.name ?? null };
     }
   }
   return null;
+}
+
+// A parser should answer { error } on bad input; one that throws gets the same
+// { error } result, so findManifest still returns the project and its message names
+// the manifest file.
+function parseSafely(ecosystem, text) {
+  if (!ecosystem.parse) return {};
+  try {
+    return ecosystem.parse(text) ?? {};
+  } catch (error) {
+    return { error: `${ecosystem.file} could not be read: ${String(error?.message ?? error)}` };
+  }
 }
 
 // Specs that never reach a registry, so a verdict on them would mean nothing.
