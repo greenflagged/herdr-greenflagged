@@ -1,8 +1,8 @@
 # Greenflagged
 
-Spot rejected and unreviewed npm dependencies as your agent works, and see what to use instead. [Greenflagged](https://greenflagged.dev) is a private npm registry that scans and reviews every package it serves. It is free for personal use.
+A dependency tree viewer for Herdr. It follows the terminal you're working in and shows the project's dependency tree for Python, Rust, Go, Java and Kotlin, read from its manifest and lockfile, without checking it. For npm (JavaScript), Greenflagged's checks are the extra layer: the panel spots rejected and unreviewed dependencies as your agent works and shows what to use instead. [Greenflagged](https://greenflagged.dev) is a private npm registry that scans and reviews every package it serves. It is free for personal use.
 
-![Greenflagged panel for link-shortener: 7 ok, 3 attention and 1 blocked; request is rejected, with @cypress/request suggested instead](preview.png)
+![Two Greenflagged panels side by side under titles. Left, "Dependency tree: Python · Rust · Go · Java · Kotlin": the Rust crate crab-daemon reading "Rust: no Greenflagged checks yet" and "26 direct, 416 total", with its dependencies as plain rows and the crab-notifier crate expanded. Right, "Checked: npm": link-shortener with 7 ok, 3 attention and 1 blocked; request is rejected, with @cypress/request suggested instead](preview.png)
 
 ## What you see
 
@@ -24,6 +24,29 @@ Top to bottom, 320 px wide, on theme `surface`:
   dependencies and a status label; below that, the constraint and `→ version`; below that, a reason if
   there is one.
 - **`▸ N greenflagged`**: a row that unfolds the ok packages.
+
+In a language Greenflagged can't check (the `unsupported` state: Python, Rust, Go, Java and Kotlin),
+the same frame holds a plain tree instead, and no request is sent, with or without a token:
+
+- **Header**: the project's name from its manifest (13 px semibold `foreground`), then
+  "<Language>: no Greenflagged checks yet" (12 px `muted`). The language is the ecosystem's, or
+  "Kotlin" / "Java/Kotlin" for a Maven or Gradle build.
+- **Counts**, 12 px `dim`: "N direct, M total", each package counted once, with `+` after M when a
+  walk hit its ceiling. A lone `(workspace)` root reads "N projects, M total", and the workspace row
+  isn't in M. A resolver that skips the count walk (`count: false`) gives no total, only "N direct".
+- **Notes**, 11 px, only when they apply: a parse error in `ansi1` (with the last valid tree dimmed
+  below it), then in `ansi3` the tree's note ("No lockfile, so only direct dependencies are shown.",
+  a lockfile that couldn't be read, or the Maven and Gradle sentences) and the project's note, and in
+  `dim` the count of local or git dependencies.
+- **Rows**, scrolling, 13 px, with no dots, because dots mean verdicts. Each is indented 12 px per
+  level: a `▸`/`▾` (11 px `dim`) when it can open, the name in `muted`, the version (or the
+  constraint, without a lock) in 11 px `muted`, then any marker or cfg tag, a `(kind)` tag such as
+  `(workspace)` or `(project)`, `dev` and `(cycle)`, in 11 px `dim`. A group heading like Go's
+  `indirect` or Gradle's `resolved` has its name in `dim`. Rows open one level at a time and
+  highlight with `hover`; clicking one opens or closes it and opens no page.
+- With no tree to draw, the body is one 12 px `muted` line: "Greenflagged doesn't check
+  <Language> dependencies yet.", "No dependencies in <file>.", or, for a manifest with no
+  dependency tables, "No dependency tables in <file>; dependencies declared elsewhere aren't read."
 
 ## How it behaves
 
@@ -62,7 +85,9 @@ Levels and labels come from the audit `status`:
   project and dependency list was audited in the last 5 minutes. Saving with the same dependencies or
   flipping back to a recent project sends no request.
 - `›` collapses the docked panel to a 40 px rail: `‹`, the blocked, attention and ok counts stacked in
-  their colors, then "Dependencies" reading top to bottom in `muted`, which also expands it. Below 120 px wide it draws the rail however it got there, and `‹` restores the last width.
+  their colors, then "Dependencies" reading top to bottom in `muted`, which also expands it. For a
+  tree the rail shows one number in `dim` instead, the N of the counts line (directs, or projects for
+  a workspace). Below 120 px wide it draws the rail however it got there, and `‹` restores the last width.
 - `↗` detaches it into a 340×600 window: a key `greenflagged`, kept across restarts, that stays where dropped
   and keeps Freeze and its project. The docked block hides. `↙` in the window docks it again. Dragging
   anywhere but a control moves the window.
