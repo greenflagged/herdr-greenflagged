@@ -293,20 +293,32 @@ test("input over the cap is refused", () => {
   assert.match(parseGradle(" ".repeat(MAX_GRADLE_LENGTH + 1)).error, /1048576-character cap/);
 });
 
-// A linearity guard, not a Herdr budget: see gradle.js's header.
-test("scans a 16,000-statement KMP build file near the cap in under 100 ms", () => {
-  const lines = [];
-  for (let i = 0; i < 16000; i++) lines.push(`implementation("g:a-${i}:1.${i}.0") { exclude(group = "x") }`);
-  const text = `kotlin {\n sourceSets {\n commonMain.dependencies {\n${lines.join("\n")}\n}\n}\n}\n`;
-  assert.ok(text.length > 900_000 && text.length <= MAX_GRADLE_LENGTH);
-  assert.equal(parseGradle(text).deps.length, 16000);
-  let best = Infinity;
-  for (let run = 0; run < 3; run++) {
-    const start = performance.now();
-    parseGradle(text);
-    best = Math.min(best, performance.now() - start);
-  }
-  assert.ok(best < 100, `best of three took ${best.toFixed(1)} ms`);
+// A linearity guard, not a Herdr budget: see gradle.js's header. It compares two sizes
+// rather than timing against a fixed limit, because CI runners are several times slower
+// than a laptop. 8x the statements should take about 8x as long; quadratic would be 64x.
+test("scanning a KMP build file near the cap stays linear", () => {
+  const kmp = (n) => {
+    const lines = [];
+    for (let i = 0; i < n; i++) lines.push(`implementation("g:a-${i}:1.${i}.0") { exclude(group = "x") }`);
+    return `kotlin {\n sourceSets {\n commonMain.dependencies {\n${lines.join("\n")}\n}\n}\n}\n`;
+  };
+  const small = kmp(2000);
+  const large = kmp(16000);
+  assert.ok(large.length > 900_000 && large.length <= MAX_GRADLE_LENGTH);
+  assert.equal(parseGradle(large).deps.length, 16000);
+  const bestOf = (text) => {
+    let best = Infinity;
+    for (let run = 0; run < 5; run++) {
+      const start = performance.now();
+      parseGradle(text);
+      best = Math.min(best, performance.now() - start);
+    }
+    return best;
+  };
+  const smallMs = bestOf(small);
+  const largeMs = bestOf(large);
+  assert.ok(largeMs < 1000, `16,000 statements took ${largeMs.toFixed(1)} ms`);
+  assert.ok(largeMs < smallMs * 24, `8x the input took ${(largeMs / smallMs).toFixed(1)}x as long (${smallMs.toFixed(1)} ms → ${largeMs.toFixed(1)} ms)`);
 });
 
 // --- gradle.lockfile ---------------------------------------------------------------------
