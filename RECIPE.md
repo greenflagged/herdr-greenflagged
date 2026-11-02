@@ -94,10 +94,13 @@ Levels and labels come from the audit `status`:
   exports `graphResolver` (a lock's package list to `resolve`) and `mergeDirect` (a lock's own record of
   the project's directs, joined with the manifest's) for each language to reuse.
 - `python.js`: pure logic, Python's half of the tree: `pyproject.toml` (PEP 621, dependency groups,
-  poetry) and `requirements.txt` parsers, and `uv.lock` / `poetry.lock` read into package lists. Under
-  Node, a 29-package `uv.lock` (118 KB, 9 KB once its wheel lines are dropped) parses in 0.11 ms with
-  the strip and 0.52 ms without; a 290-package one in 0.92 ms (5.4 ms without). At #7's estimated
-  ~1000× for Herdr that is ~0.1 s and ~0.9 s. Its header lists the Python edge cases.
+  poetry) and `requirements.txt` parsers, and `uv.lock` / `poetry.lock` read into package lists.
+  Measured 2026-11-01 under Node 26.3.0 (mean of 20 runs, on a local `uv init` project that isn't in
+  the repo): its 29-package `uv.lock` (118 KB, 9 KB once its wheel lines are dropped) takes 0.14 ms to
+  strip and parse, against 0.47 ms to parse raw. A synthetic 290-package lock (that lock's packages
+  copied ten times under new names, 1.18 MB raw and 91 KB stripped) takes 1.25 ms, against 5.0 ms raw.
+  At #7's estimated ~1000× for Herdr that is ~0.1 s and ~1.3 s. Its header lists the Python edge
+  cases.
 - `main.js`: the `View`. From `herdr`: `spaces`, `panes`, `focused`, `exec`, `home`, `readTextFile`,
   `watchFolder`, `theme`. It runs `printenv`, `xdg-open` then `open` for links, and
   `npm login` through `run("tab.new", { name, argv, folder })`.

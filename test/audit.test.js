@@ -73,6 +73,12 @@ test("findManifest surfaces a package.json that is not valid JSON", async () => 
   assert.equal(project.error, "package.json is not valid JSON");
 });
 
+test("findManifest surfaces a pyproject.toml that is not valid TOML as the error state", async () => {
+  const project = await findManifest("/r", "/Users/a", files({ "/r/pyproject.toml": "[project\nname = 1", "/r/requirements.txt": "httpx" }));
+  assert.equal(project.path, "/r/pyproject.toml");
+  assert.match(project.error, /^pyproject\.toml line 1: /);
+});
+
 test("findManifest keeps list order among unaudited manifests in one folder", async () => {
   const all = { "/r/pyproject.toml": "[project]\ndependencies = []", "/r/requirements.txt": "", "/r/Cargo.toml": "", "/r/go.mod": "" };
   assert.equal((await findManifest("/r", "/Users/a", files(all))).path, "/r/pyproject.toml");

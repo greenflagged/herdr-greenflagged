@@ -172,6 +172,29 @@ test("stripLockFiles keeps a url line outside a wheels block and a single-line w
   assert.equal(stripLockFiles(inline), inline);
 });
 
+test("stripLockFiles ends a wheels block at its first line that isn't a one-line table", () => {
+  const text = '[[package]]\nname = "a"\nversion = "1"\nwheels = [\n    { url = "w" },\n  ]\n\n[[package]]\nname = "b"\nversion = "2"\n';
+  const stripped = stripLockFiles(text);
+  assert.equal(stripped, text.replace('    { url = "w" },\n', ""));
+  assert.deepEqual(uvPackages(toml(stripped)).map((p) => p.name), ["a", "b"]);
+});
+
+test("stripLockFiles keeps an sdist table that spans lines, and a wheel item that does", () => {
+  const text = 'sdist = {\n  url = "x",\n  hash = "y" }\nwheels = [\n    { url = "w",\n      hash = "h" },\n]\n';
+  assert.equal(stripLockFiles(text), text);
+  assert.equal(stripLockFiles('sdist = { url = "}" }\nwheels = [\n    { url = "a}b", n = \'{\' },\n]\n'), "wheels = [\n]\n");
+  const nested = 'wheels = [\n    { url = "a", n = { x = 1 } },\n]\n';
+  assert.equal(stripLockFiles(nested), nested);
+});
+
+test("the lock readers answer an error, not a throw, for input that isn't text", () => {
+  assert.equal(stripLockFiles(null), "");
+  for (const bad of [null, undefined, 42, {}]) {
+    assert.ok(uvResolver(bad, null).error);
+    assert.ok(poetryResolver(bad).error);
+  }
+});
+
 // --- uv.lock -------------------------------------------------------------------
 
 test("uvResolver builds the tree from the project's own lock entry, one row per locked version", async () => {
@@ -232,7 +255,8 @@ test("uvResolver shows an edge to a package the lock lacks as a leaf with its ow
 test("uvResolver finds the project by its one virtual package when the name doesn't match", () => {
   const project = { ...uvProject(), name: "renamed" };
   const made = uvResolver(read("uv", "uv.lock"), project);
-  assert.equal(made.direct.length, 8); // httpx, numpy ×2, rich, pytest ×2 from each of two groups
+  const rows = [...new Set(made.direct.map((d) => `${d.name}@${d.version}`))].sort();
+  assert.deepEqual(rows, ["httpx@null", "numpy@2.0.2", "numpy@2.2.6", "pytest@8.4.2", "pytest@9.2.0", "rich@null"]);
   assert.ok(uvResolver(read("uv", "uv.lock"), { name: null, deps: [] }).direct);
 });
 

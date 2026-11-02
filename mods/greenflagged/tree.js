@@ -11,7 +11,8 @@
 //             better (one row per locked version of a split dependency, say)
 //
 // `marker` is row metadata, never identity: rows merge on name@version, and a merged
-// row shows the first non-null marker among its edges.
+// row shows the first non-null marker among its edges. Child edges that differ only in
+// marker are one edge, and it keeps the first non-null marker too.
 //
 // A node is built only when its parent is expanded, so a package several others
 // depend on costs nothing until someone opens it under each of them.
@@ -74,7 +75,11 @@ function group(resolved) {
     entry.constraint ??= edge.constraint ?? null;
     entry.marker ??= edge.marker ?? null;
     for (const extra of edge.extras ?? []) entry.extras.add(extra);
-    for (const child of resolution?.children ?? []) entry.edges.set(edgeId(child), child);
+    for (const child of resolution?.children ?? []) {
+      const id = edgeId(child), seen = entry.edges.get(id);
+      if (!seen) entry.edges.set(id, child);
+      else if (seen.marker == null && child.marker != null) entry.edges.set(id, { ...seen, marker: child.marker });
+    }
     entry.dev = entry.dev && Boolean(edge.dev);
   }
   return [...byKey.values()].map((entry) => ({ ...entry, extras: [...entry.extras].sort(), childEdges: [...entry.edges.values()] }));

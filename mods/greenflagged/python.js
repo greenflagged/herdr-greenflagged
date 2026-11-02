@@ -1,9 +1,9 @@
 // Python manifests and lockfiles for the plain dependency tree: pyproject.toml and
 // requirements.txt in, uv.lock and poetry.lock read into the package list that
 // tree.js's graphResolver walks. Plain data in and out, with no Herdr imports, so
-// `npm test` can run it under Node without the app. Nothing here throws, and every
-// pass over file-sized input is a single one: regexes only ever see one requirement
-// string or one line.
+// `npm test` can run it under Node without the app. Nothing here throws, whatever the
+// input, text or not. Each file is read in one pass, and no regex ever sees more than
+// one requirement string or one line.
 //
 // The package lists (`uvPackages`, `poetryPackages`) are the piece a future PyPI
 // audit reuses: they are the locked name@version set, with names normalized the way
@@ -194,24 +194,48 @@ export function parseRequirements(text) {
 }
 
 // Drops what the tree never reads from a lockfile before it is parsed: the items of
-// uv's `wheels = [` and poetry's `files = [` arrays, and uv's `sdist = ` key. Those are
-// 92% of a real uv.lock. A block opens only on a line that is exactly `wheels = [` or
-// `files = [` and closes on a line that is exactly `]`; both are kept, so the array
-// stays valid and empty. A line that doesn't match exactly is kept, so a format change
-// makes this strip less, never strip something else.
+// uv's `wheels = [` and poetry's `files = [` arrays, and uv's `sdist = ` key. On the
+// 29-package `uv.lock` of a local `uv init` project (uv 0.9.26, 2026-11-01) those lines
+// were 92% of the file. A block opens only on a line that is exactly `wheels = [` or
+// `files = [`, and inside it only an item that is one whole inline table on one line,
+// with no table nested in it (`{ ... }` or `{ ... },`), is dropped. The first line that isn't one ends the block and
+// is kept, so the array still closes. `sdist = ` is dropped only when the inline table
+// closes on the same line. Anything else is kept. So if the lock format changes, this
+// strips less, and it never strips anything else.
 export function stripLockFiles(text) {
+  if (typeof text !== "string") return "";
   const out = [];
   let inBlock = false;
   for (const raw of text.split("\n")) {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     if (inBlock) {
-      if (line === "]") { inBlock = false; out.push(raw); }
-    } else if (line === "wheels = [" || line === "files = [") {
-      inBlock = true;
-      out.push(raw);
-    } else if (!line.startsWith("sdist = ")) out.push(raw);
+      if (isOneLineTable(line.trim())) continue;
+      inBlock = false;
+    }
+    if (line === "wheels = [" || line === "files = [") inBlock = true;
+    else if (line.startsWith("sdist = ") && isOneLineTable(line.slice("sdist = ".length))) continue;
+    out.push(raw);
   }
   return out.join("\n");
+}
+
+// One inline table on one line, `{ ... }` with an optional trailing comma, holding no
+// nested table: outside its one-line strings there is no other brace. Each character
+// can match only one branch, so the match is linear in the line's length. The common
+// line, a wheel's table with one brace at each end and no quote in a string, is
+// answered without the regex, because the strip runs over every line of the lock.
+const ONE_LINE_TABLE = /^\{(?:[^{}"'\\]|"(?:[^"\\\n]|\\.)*"|'[^'\n]*')*\},?$/;
+function isOneLineTable(text) {
+  const end = text.endsWith(",") ? text.length - 2 : text.length - 1;
+  if (text[0] !== "{" || text[end] !== "}") return false;
+  const inner = text.slice(1, end);
+  if (!/[{}'\\]/.test(inner) && evenQuotes(inner)) return true;
+  return ONE_LINE_TABLE.test(text);
+}
+function evenQuotes(text) {
+  let n = 0;
+  for (let i = text.indexOf('"'); i !== -1; i = text.indexOf('"', i + 1)) n++;
+  return n % 2 === 0;
 }
 
 // A uv dependency entry: { name, version?, marker?, extra? }.
@@ -283,6 +307,7 @@ export function poetryPackages(toml) {
 const NO_PACKAGES = "no [[package]] entries with a name and version";
 
 function readLock(text, toPackages) {
+  if (typeof text !== "string") return { error: "the lockfile is not text" };
   const parsed = parseToml(stripLockFiles(text));
   if (parsed.error) return { error: parsed.error };
   const packages = toPackages(parsed.value);

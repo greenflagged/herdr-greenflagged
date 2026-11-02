@@ -485,6 +485,17 @@ each("a row keeps the first marker among its edges, on roots and children", asyn
   assert.deepEqual(tree.roots[0].children.map((n) => [n.key, n.marker]), [["c@1", "first"]]);
 });
 
+each("child edges that differ only in marker keep the first non-null marker", async (wrap) => {
+  const graph = { p: { version: "1", children: [
+    { name: "c", version: "1", constraint: ">=1" },
+    { name: "c", version: "1", constraint: ">=1", marker: "first" },
+    { name: "c", version: "1", constraint: ">=1", marker: "last" },
+  ] } };
+  const tree = await buildTree([{ name: "p", version: "1", constraint: "*", dev: false }], wrap((edge) => graph[edge.name] ?? { version: edge.version, children: [] }));
+  await expandNode(tree, tree.roots[0], [tree.roots[0].key]);
+  assert.deepEqual(tree.roots[0].children.map((n) => [n.key, n.marker]), [["c@1", "first"]]);
+});
+
 test("treeForProject builds from a resolver's direct list when it has one", async () => {
   const project = { deps: [dep("a")] };
   const resolver = () => ({ resolve: () => null, direct: [{ name: "a", version: "1", constraint: "*", dev: false }, { name: "a", version: "2", constraint: "*", dev: false }] });
