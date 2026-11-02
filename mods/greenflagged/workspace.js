@@ -7,7 +7,9 @@
 // Glob support, per path segment: `*` matches any run of characters and `?` one
 // character, within one segment. `**` is treated as `*` (one level, not any depth), and
 // `[...]` classes are matched literally. `.` and `..` segments are collapsed. A pattern
-// that names no wildcard is a literal folder and isn't listed.
+// that names no wildcard is a literal folder and isn't listed. As in Cargo, a pattern
+// may climb above the root with `..` or be absolute, so the folders it lists and answers
+// can lie outside the project; nothing here keeps them under the root.
 
 export const MAX_MEMBERS = 256; // member folders in total; past it the rest aren't read
 

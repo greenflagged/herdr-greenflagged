@@ -70,7 +70,7 @@ test("parseCargoToml reads a single crate's dependency tables", () => {
     { name: "syn", constraint: "2", dev: false },
     { name: "tokio", constraint: "1", dev: false },
     { name: "serde_json", constraint: "1", dev: false },
-    { name: "cc", constraint: "1.0", dev: false },
+    { name: "cc", constraint: "1.0", dev: false, marker: "build" },
     { name: "proptest", constraint: "1.6", dev: true },
     { name: "libc", constraint: "0.2", dev: false, marker: "cfg(unix)" },
   ]);
@@ -135,7 +135,7 @@ test("parseCargoToml inherits workspace = true from [workspace.dependencies] in 
   assert.deepEqual(skipped, ["util"]);
 });
 
-test("parseCargoToml reads dev and build tables under [target.<cfg>], and keeps a skipped dependency's table", () => {
+test("parseCargoToml tags build rows `build`, after which a target's cfg follows, and keeps them runtime", () => {
   const { deps, local } = parseCargoToml([
     '[package]', 'name = "a"',
     "[target.'cfg(windows)'.dev-dependencies]", 'winapi-test = "0.3"', 'helper = { path = "helper" }',
@@ -143,7 +143,7 @@ test("parseCargoToml reads dev and build tables under [target.<cfg>], and keeps 
   ].join("\n"));
   assert.deepEqual(deps, [
     { name: "winapi-test", constraint: "0.3", dev: true, marker: "cfg(windows)" },
-    { name: "pkg-config", constraint: "0.3", dev: false, marker: "cfg(unix)" },
+    { name: "pkg-config", constraint: "0.3", dev: false, marker: "build, cfg(unix)" },
   ]);
   assert.deepEqual(local, [{ name: "helper", constraint: null, dev: true, marker: "cfg(windows)" }]);
 });
@@ -269,7 +269,7 @@ test("a single crate shows its tree, with the twice-locked crate at the version 
   assert.equal(tree.note, null);
   assert.equal(tree.lockFile, "Cargo.lock");
   assert.deepEqual(summary(tree.roots), [
-    ["cc", "1.2.25", null, false],
+    ["cc", "1.2.25", "build", false],
     ["from-git", "0.2.0", null, false], // path and git directs come from the project's lock entry
     ["libc", "0.2.172", "cfg(unix)", false],
     ["local-util", "0.1.0", null, false],
@@ -509,6 +509,40 @@ test("cargoProject marks the members incomplete when a folder can't be listed", 
   const none = await gather("/home/w", memoryIo({ "/home/w/Cargo.toml": '[workspace]\nmembers = ["crates/*"]\n' }, { list: () => { throw new Error("no find"); } }), "/home");
   assert.equal(none.membersIncomplete, true);
   assert.deepEqual(none.crates, []);
+});
+
+test("cargoProject keeps a member folder in the workspace when the listing that would find it fails", async () => {
+  const files = {
+    "/home/w/Cargo.toml": '[workspace]\nmembers = ["crates/*"]\n[workspace.dependencies]\nserde = "1"\n',
+    "/home/w/crates/a/Cargo.toml": '[package]\nname = "a"\nversion = "0.2.0"\n[dependencies]\nserde.workspace = true\n',
+  };
+  const project = await gather("/home/w/crates/a", memoryIo(files, { list: async () => null }), "/home");
+  assert.equal(project.membersIncomplete, true);
+  assert.equal(project.layout, "crate");
+  assert.equal(project.workspaceFolder, "/home/w"); // the root's Cargo.lock, not crates/a's
+  assert.deepEqual(project.crates.map((c) => c.name), ["a"]);
+  assert.deepEqual(project.deps, [{ name: "serde", constraint: "1", dev: false }]);
+  // A complete listing that misses the folder still leaves it standalone.
+  const stray = await findManifest("/home/w/b", "/home", memoryIo({ ...files, "/home/w/b/Cargo.toml": '[package]\nname = "b"\n' }).read);
+  assert.equal(await cargoProject(stray, memoryIo({ ...files, "/home/w/b/Cargo.toml": '[package]\nname = "b"\n' })), stray);
+});
+
+test("cargoProject says how many member manifests it couldn't read", async () => {
+  const files = {
+    "/home/w/Cargo.toml": '[workspace]\nmembers = ["crates/*"]\n',
+    "/home/w/crates/a/Cargo.toml": '[package]\nname = "a"\n',
+    "/home/w/crates/b/Cargo.toml": '[package\nname = "b"\n',
+  };
+  const one = await gather("/home/w", memoryIo(files), "/home");
+  assert.deepEqual(one.crates.map((c) => c.name), ["a"]);
+  assert.equal(one.membersIncomplete, false);
+  assert.equal(one.note, "1 member Cargo.toml couldn't be read, so its crate isn't shown.");
+  const member = await gather("/home/w/crates/a", memoryIo(files), "/home");
+  assert.equal(member.note, "1 member Cargo.toml couldn't be read, so its crate isn't shown.");
+  const two = await gather("/home/w", memoryIo({ ...files, "/home/w/crates/c/Cargo.toml": "= nope\n" }), "/home");
+  assert.equal(two.note, "2 member Cargo.toml files couldn't be read, so their crates aren't shown.");
+  const clean = await gather("/home/w", memoryIo({ ...files, "/home/w/crates/b/Cargo.toml": '[package]\nname = "b"\n' }), "/home");
+  assert.equal(clean.note, null);
 });
 
 test("cargoProject reads at most MAX_MEMBERS members and says so", async () => {

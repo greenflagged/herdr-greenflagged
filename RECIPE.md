@@ -102,7 +102,7 @@ Levels and labels come from the audit `status`:
   tests run the valid cases of `toml-test`, vendored in `test/fixtures/toml-test/`.
 - `tree.js`: pure logic, the plain dependency tree for a language Greenflagged can't check. A language gets one
   by adding `parse` and `lockfiles` to its `ECOSYSTEMS` entry; Python's are the first. Rows are name and
-  version in `muted` with no dots, expanded one level at a time, with an environment marker (or Rust's target cfg) as a small
+  version in `muted` with no dots, expanded one level at a time, with an environment marker (or Rust's target cfg and `build`) as a small
   truncated `muted` tag when the lock has one. A shared package expands under each parent,
   a package already on its own path shows "(cycle)", and "N direct, M total" counts each package once. `dev`
   marks a package reachable only through dev dependencies. A resolver that skips the count walk
@@ -122,7 +122,7 @@ Levels and labels come from the audit `status`:
   At #7's estimated ~1000× for Herdr that is ~0.1 s and ~1.3 s. Its header lists the Python edge
   cases.
 - `cargo.js`: pure logic, Rust's half of the tree: a `Cargo.toml` parser (dependency, build and dev
-  tables, target tables with their cfg as the marker, `package` renames, `workspace = true` and
+  tables, target tables with their cfg as the marker, `build` as the marker of a build table's rows, `package` renames, `workspace = true` and
   `version.workspace = true`, virtual manifests) and `Cargo.lock` read into a package list. A v3 or v4
   lock edge names a version only when two versions of that crate are locked, and a crate's own lock entry
   says which one a direct means (without one, the highest locked version the direct's constraint

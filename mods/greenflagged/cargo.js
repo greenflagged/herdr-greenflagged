@@ -6,8 +6,9 @@
 //
 // Rust edge cases, so RECIPE.md can point here instead of growing:
 // - `[dependencies]` and `[build-dependencies]` are runtime rows, `[dev-dependencies]`
-//   are `dev`, and the same three tables under `[target.<cfg>]` carry the cfg string
-//   as the row's marker. The first table that names a crate wins.
+//   are `dev`. A `[build-dependencies]` row carries the marker `build`. The same three
+//   tables under `[target.<cfg>]` carry the cfg string as the marker, after `build, `
+//   for a target's build table. The first table that names a crate wins.
 // - `alias = { package = "real" }` shows the real crate name, which is what the lock
 //   records. A `path` or `git` dependency is skipped (not audited) even when it also
 //   gives a version, but when the project's own lock entry lists it, it is still a row,
@@ -25,11 +26,16 @@
 //   else `package.workspace = "<path>"` names the root; else the first ancestor
 //   Cargo.toml with `[workspace]` is (over the same ancestors manifest discovery tries).
 //   A crate with no root, one the root `exclude`s, or one the root's `members` don't
-//   match is standalone: its own Cargo.lock beside it, as Cargo treats it.
+//   match is standalone: its own Cargo.lock beside it, as Cargo treats it. When the
+//   member listing is incomplete (below), a crate it missed is taken as a member.
 // - Members come from the root's `members` globs (workspace.js: `*` and `?` within one
 //   segment, `**` as one level, `[...]` literal) minus `exclude`, at most MAX_MEMBERS.
 //   When a folder can't be listed or the cap is reached, the lock's sourceless packages
-//   fill in the crates the listing missed. `default-members` isn't read.
+//   fill in the crates the listing missed. `default-members` isn't read. A member
+//   Cargo.toml that can't be read or parsed is left out, and the project's note says how
+//   many were.
+// - Member paths may climb out of the root (`../tools/x`) or be absolute, as in Cargo,
+//   so the Cargo.toml files read can lie outside the project folder. They are only read.
 // - At the workspace root the tree is one `(workspace)` row whose children are the
 //   crates (the root package too, when there is one). In a member's folder the top level
 //   is that crate's directs, with versions and subtrees from the root's Cargo.lock. Either
@@ -43,9 +49,10 @@
 // - A `[package]` with no version shows `0.0.0`, which is what Cargo records for it.
 // - A member outside the root folder (`../tools/x`) is read but not watched: saving its
 //   Cargo.toml shows on the next refresh.
-// - A lock item names a crate by name and version only, so two entries with the same
-//   name and version from different sources (a git fork pinned to the registry's
-//   version) both resolve to the first.
+// - parseLockDependency keeps a lock item's name and version and drops its source. So
+//   two entries with the same name and version from different sources (say, a git fork
+//   pinned to the registry's version) both resolve to the first, even though the lock
+//   names the source for exactly this case.
 // - Features aren't read: Cargo.lock lists optional dependencies whatever features
 //   are on, so an `optional = true` crate is a normal row. `[patch]` and `[replace]`
 //   aren't applied.
@@ -61,7 +68,10 @@ const has = (table, key) => Object.prototype.hasOwnProperty.call(table, key);
 // A direct dependency in parse's shape; `marker` only when there is one.
 const direct = (name, constraint, dev, marker) => ({ name, constraint, dev, ...(marker ? { marker } : {}) });
 
-const TABLES = [["dependencies", false], ["build-dependencies", false], ["dev-dependencies", true]];
+// [table, dev, build]
+const TABLES = [["dependencies", false, false], ["build-dependencies", false, true], ["dev-dependencies", true, false]];
+// A row's marker: `build` for a build table, the target's cfg, or both ("build, cfg(windows)").
+const markerOf = (build, cfg) => [build ? "build" : null, cfg].filter(Boolean).join(", ") || null;
 
 // One Cargo dependency spec: "1.0", or { version?, package?, path?, git?, workspace? }.
 // Answers { dep } or { skip: name }, or null for a shape it doesn't know.
@@ -130,10 +140,10 @@ export function parseCargoToml(text, inherited = null) {
       } else deps.set(name, result.dep);
     }
   };
-  for (const [key, dev] of TABLES) read(doc[key], dev, null);
+  for (const [key, dev, build] of TABLES) read(doc[key], dev, markerOf(build, null));
   if (isTable(doc.target)) {
     for (const [cfg, target] of Object.entries(doc.target)) {
-      if (isTable(target)) for (const [key, dev] of TABLES) read(target[key], dev, cfg);
+      if (isTable(target)) for (const [key, dev, build] of TABLES) read(target[key], dev, markerOf(build, cfg));
     }
   }
   return {
@@ -159,7 +169,8 @@ function packageVersion(pkg, workspace, inherited) {
 }
 
 // One item of a lock entry's `dependencies`: "name", "name version" (when several
-// versions of that crate are locked), or "name version (source)" in v1/v2 locks.
+// versions of that crate are locked), or "name version (source)" (always in v1 locks,
+// and in later ones when the name and version alone are ambiguous). The source is dropped.
 export function parseLockDependency(text) {
   if (typeof text !== "string") return null;
   const [name, version] = text.trim().split(/\s+/);
@@ -402,7 +413,9 @@ const parseSafely = (text, inherited) => {
 //                    [workspace] as `inherited`
 //   layout           "workspace" at the root, "crate" in a member's folder
 //   fingerprint      what in the member manifests changes the tree
-//   membersIncomplete, note   when the folders couldn't all be listed, or MAX_MEMBERS cut them
+//   membersIncomplete  when the folders couldn't all be listed, or MAX_MEMBERS cut them
+//   note               says MAX_MEMBERS cut them, and how many member Cargo.toml files
+//                      couldn't be read; null when neither happened
 // Never rejects: anything that goes wrong answers the project unchanged.
 export async function cargoProject(project, io) {
   try {
@@ -422,13 +435,24 @@ export async function cargoProject(project, io) {
     if (project.folder !== root.folder && exclude.some((e) => under(project.folder, collapse(root.folder, e)))) return project;
     const expanded = await expandMembers(root.folder, members, exclude, io.list);
     const folders = [...new Set([...(root.manifest.virtual ? [] : [root.folder]), ...expanded.folders])];
-    // Cargo refuses to build a crate its root's members don't name; its own lock is the best guess.
-    if (project.folder !== root.folder && !folders.includes(project.folder)) return project;
+    const membersIncomplete = expanded.unlisted || expanded.capped;
+    if (project.folder !== root.folder && !folders.includes(project.folder)) {
+      // Cargo refuses to build a crate its root's members don't name; its own lock is the
+      // best guess. But a listing that came up short may simply have missed it.
+      if (!membersIncomplete) return project;
+      folders.push(project.folder);
+    }
     const inherited = root.manifest.workspace;
     const parsed = await Promise.all(folders.map(async (folder) => {
       const path = `${folder}/Cargo.toml`;
       return { folder, path, manifest: parseSafely(await readSafely(io, path), inherited) };
     }));
+    const unread = parsed.filter((c) => !c.manifest || c.manifest.error).length;
+    const notes = [
+      expanded.capped ? `Showing the first ${MAX_MEMBERS} workspace members.` : null,
+      unread === 1 ? "1 member Cargo.toml couldn't be read, so its crate isn't shown." : null,
+      unread > 1 ? `${unread} member Cargo.toml files couldn't be read, so their crates aren't shown.` : null,
+    ].filter(Boolean);
     const crates = parsed.filter((c) => typeof c.manifest?.name === "string").map(({ folder, path, manifest }) => ({
       name: manifest.name, version: manifest.version, folder, path, deps: manifest.deps, skipped: manifest.skipped, local: manifest.local,
     }));
@@ -436,8 +460,8 @@ export async function cargoProject(project, io) {
       workspaceFolder: root.folder,
       crates,
       fingerprint: crates.map((c) => [c.path, c.version, c.deps, c.local]),
-      membersIncomplete: expanded.unlisted || expanded.capped,
-      note: expanded.capped ? `Showing the first ${MAX_MEMBERS} workspace members.` : null,
+      membersIncomplete,
+      note: notes.length ? notes.join(" ") : null,
     };
     if (project.folder === root.folder) {
       return {

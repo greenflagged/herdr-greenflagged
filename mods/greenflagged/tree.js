@@ -310,9 +310,10 @@ export const failedNote = (file, error) => `Couldn't read ${file ?? "the lockfil
 
 // The tree for a project (`deps` from its ecosystem's `parse`), with `note` and
 // `lockFile` set. `lock` is { file, text, resolver } or null when no lockfile was
-// found; then `unlocked(project)`, when given, may answer a resolver that shapes the
-// tree from the manifests alone (null, or a throw, keeps the plain directs). A tree
-// whose one root is a workspace row opens it when `expanded` is empty. If the lockfile or the walk fails, the tree keeps only the directs and says
+// found. With no lock, `unlocked(project)`, when given, may answer a resolver that
+// shapes the tree from the manifests alone; null, or a throw, keeps the plain directs.
+// A tree whose one root is a workspace row opens that row when `expanded` is empty.
+// If the lockfile or the walk fails, the tree keeps only the directs and says
 // why in `note`; this function never sets an error state. If `stale()` is true once
 // the walk ends, it returns null before expandPaths runs, so `expanded` is untouched.
 // A refresh that starts during expandPaths isn't caught: expandPaths still deletes
