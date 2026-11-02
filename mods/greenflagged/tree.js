@@ -95,9 +95,10 @@ async function resolveAll(resolve, edges) {
 // Walk 1 starts from the runtime directs. The cap (MAX_TREE_NODES) never cuts it, so
 // `runtime` is exact and a runtime package never gets the `dev` tag.
 // Walk 2 starts from the dev directs. It is the only walk the cap can stop.
-// Both walks also stop at the hard ceilings (`maxVisits`, `maxPops`), which only a
-// pathological lockfile reaches. Then `capped` is set and `runtime` may be short, so
-// a runtime package past the ceiling can show as `dev`.
+// Both walks also stop at the hard ceilings (`maxVisits`, `maxPops`). How often a real
+// lockfile reaches them is unmeasured: no ecosystem has a resolver yet. Then `capped`
+// is set and `runtime` may be short, so a runtime package past the ceiling can show
+// as `dev`.
 export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, maxVisits = MAX_WALK_VISITS, maxPops = MAX_WALK_POPS, pause } = {}) {
   const counted = typeof resolver === "function" || resolver.count !== false;
   const resolve = memoize(typeof resolver === "function" ? resolver : resolver.resolve);
@@ -243,17 +244,20 @@ export const failedNote = (file, error) => `Couldn't read ${file ?? "the lockfil
 // The tree for a project (`deps` from its ecosystem's `parse`), with `note` and
 // `lockFile` set. `lock` is { file, text, resolver } or null when no lockfile was
 // found. If the lockfile or the walk fails, the tree keeps only the directs and says
-// why in `note`. The error state is only for a manifest that can't be read, which
-// never gets here. `stale()` true after the walk means a newer refresh has started:
-// this returns null without touching `expanded`.
+// why in `note`; this function never sets an error state. If `stale()` is true once
+// the walk ends, it returns null before expandPaths runs, so `expanded` is untouched.
+// A refresh that starts during expandPaths isn't caught: expandPaths still deletes
+// the saved paths that fail or no longer match from `expanded`.
 export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_NOTE, expanded = new Set(), pause, stale = () => false } = {}) {
   let resolver = () => null, note = lock ? null : noLockNote;
   if (lock && lock.text.length > MAX_LOCK_CHARS) {
-    note = `${lock.file} is too large to read, so only direct dependencies are shown.`;
+    note = `${lock.file} is too large to parse, so only direct dependencies are shown.`;
   } else if (lock) {
     try {
       const made = lock.resolver(lock.text, project);
-      if (made?.error) note = failedNote(lock.file, made.error); else resolver = made;
+      if (made?.error) note = failedNote(lock.file, made.error);
+      else if (made) resolver = made;
+      else note = failedNote(lock.file, "its resolver returned nothing");
     } catch (error) { note = failedNote(lock.file, error); }
   }
   let tree;

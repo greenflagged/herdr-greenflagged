@@ -86,7 +86,8 @@ export async function findManifest(cwd, home, read) {
 }
 
 // A parser should answer { error } on bad input; one that throws gets the same
-// error state, rather than breaking the panel for every project.
+// { error } result, so findManifest still returns the project and its message names
+// the manifest file.
 function parseSafely(ecosystem, text) {
   if (!ecosystem.parse) return {};
   try {

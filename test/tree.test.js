@@ -407,6 +407,8 @@ test("treeForProject falls back to the directs with a note when the lockfile fai
     [() => ({ error: "bad header" }), /^Couldn't read x\.lock: bad header$/],
     [() => { throw new Error("boom"); }, /^Couldn't read x\.lock: boom$/],
     [() => ({ resolve: () => { throw new Error("deep"); } }), /^Couldn't read x\.lock: deep$/],
+    [() => null, /^Couldn't read x\.lock: its resolver returned nothing$/],
+    [() => undefined, /^Couldn't read x\.lock: its resolver returned nothing$/],
   ];
   for (const [resolver, note] of cases) {
     const tree = await treeForProject(project([dep("a")]), lockOf(resolver));
@@ -419,7 +421,7 @@ test("treeForProject doesn't parse a lockfile over the size bound", async () => 
   let called = false;
   const tree = await treeForProject(project([dep("a")]), lockOf(() => { called = true; return { resolve: () => null }; }, "x".repeat(MAX_LOCK_CHARS + 1)));
   assert.equal(called, false);
-  assert.equal(tree.note, "x.lock is too large to read, so only direct dependencies are shown.");
+  assert.equal(tree.note, "x.lock is too large to parse, so only direct dependencies are shown.");
 });
 
 test("treeForProject reopens saved rows, and a stale build leaves them alone", async () => {
