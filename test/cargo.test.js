@@ -536,11 +536,11 @@ test("cargoProject says how many member manifests it couldn't read", async () =>
   const one = await gather("/home/w", memoryIo(files), "/home");
   assert.deepEqual(one.crates.map((c) => c.name), ["a"]);
   assert.equal(one.membersIncomplete, false);
-  assert.equal(one.note, "1 member Cargo.toml couldn't be read, so its crate isn't shown.");
+  assert.equal(one.note, "1 member Cargo.toml couldn't be read.");
   const member = await gather("/home/w/crates/a", memoryIo(files), "/home");
-  assert.equal(member.note, "1 member Cargo.toml couldn't be read, so its crate isn't shown.");
+  assert.equal(member.note, "1 member Cargo.toml couldn't be read.");
   const two = await gather("/home/w", memoryIo({ ...files, "/home/w/crates/c/Cargo.toml": "= nope\n" }), "/home");
-  assert.equal(two.note, "2 member Cargo.toml files couldn't be read, so their crates aren't shown.");
+  assert.equal(two.note, "2 member Cargo.toml files couldn't be read.");
   const clean = await gather("/home/w", memoryIo({ ...files, "/home/w/crates/b/Cargo.toml": '[package]\nname = "b"\n' }), "/home");
   assert.equal(clean.note, null);
 });

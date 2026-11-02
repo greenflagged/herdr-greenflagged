@@ -33,7 +33,8 @@
 //   When a folder can't be listed or the cap is reached, the lock's sourceless packages
 //   fill in the crates the listing missed. `default-members` isn't read. A member
 //   Cargo.toml that can't be read or parsed is left out, and the project's note says how
-//   many were.
+//   many there were. The note doesn't say the crate is missing: when the lock fills in
+//   crates, it may still show, at the lock's version and with the lock's dependencies.
 // - Member paths may climb out of the root (`../tools/x`) or be absolute, as in Cargo,
 //   so the Cargo.toml files read can lie outside the project folder. They are only read.
 // - At the workspace root the tree is one `(workspace)` row whose children are the
@@ -450,8 +451,8 @@ export async function cargoProject(project, io) {
     const unread = parsed.filter((c) => !c.manifest || c.manifest.error).length;
     const notes = [
       expanded.capped ? `Showing the first ${MAX_MEMBERS} workspace members.` : null,
-      unread === 1 ? "1 member Cargo.toml couldn't be read, so its crate isn't shown." : null,
-      unread > 1 ? `${unread} member Cargo.toml files couldn't be read, so their crates aren't shown.` : null,
+      unread === 1 ? "1 member Cargo.toml couldn't be read." : null,
+      unread > 1 ? `${unread} member Cargo.toml files couldn't be read.` : null,
     ].filter(Boolean);
     const crates = parsed.filter((c) => typeof c.manifest?.name === "string").map(({ folder, path, manifest }) => ({
       name: manifest.name, version: manifest.version, folder, path, deps: manifest.deps, skipped: manifest.skipped, local: manifest.local,

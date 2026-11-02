@@ -86,15 +86,15 @@ Herdr first, then on that one, so you only need to sign in on one of them.
   `build.gradle` there too, `uv.lock` and `poetry.lock` beside a Python manifest, `Cargo.lock` at the
   root of a Rust project's workspace (beside the manifest for a crate outside any), and
   `gradle.lockfile` beside a Gradle build file. In a Rust workspace it also reads the root's
-  `Cargo.toml` and every member crate's. A member path may point outside the project (`../x` or an
-  absolute path), as Cargo allows, and that `Cargo.toml` is still read. For a Gradle build it also
-  looks for `settings.gradle.kts` or `settings.gradle` in the build file's folder and the folders above
-  it, stopping before your home folder (home is checked only when the build file itself is there), and
-  reads `gradle/libs.versions.toml`, `build.gradle.kts` and `build.gradle` from the first folder that
-  has one. At that root it also reads `build.gradle.kts` or `build.gradle` from each module folder
-  the settings file includes (up to 100), only plain folder names under the root, never `..`. It
-  reads `~/.npmrc`. It writes nothing to your project. Requests are remembered in Herdr's
-  `shared.json`.
+  `Cargo.toml` and every member crate's, up to 256. A member path may point outside the project
+  (`../x` or an absolute path), as Cargo allows, and that `Cargo.toml` is still read. For a Gradle
+  build it also looks for `settings.gradle.kts` or `settings.gradle` in the build file's folder and
+  the folders above it, stopping before your home folder (home is checked only when the build file
+  itself is there), and reads `gradle/libs.versions.toml`, `build.gradle.kts` and `build.gradle` from
+  the first folder that has one. At that root it also reads `build.gradle.kts` or `build.gradle` from
+  each module folder the settings file includes (up to 100), only plain folder names under the root,
+  never `..`. It reads `~/.npmrc`. It writes nothing to your project. Requests are remembered in
+  Herdr's `shared.json`.
 - **Programs:** it runs `printenv` to read your token, `xdg-open` or `open` when you click a row,
   `find` to list a Cargo workspace's member folders, and `npm login` when you click Sign in.
 
