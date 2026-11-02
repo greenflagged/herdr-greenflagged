@@ -6,9 +6,10 @@
 // few common shapes. A crafted build file can only change which rows are shown.
 //
 // Files read, all static names on the ECOSYSTEMS entry (audit.js): the build file, and
-// from the build root `settings.gradle.kts` or `settings.gradle` and
-// `gradle/libs.versions.toml` (the version catalog, read with toml.js); then
-// `gradle.lockfile` beside the build file, as the lockfile.
+// from the build root `settings.gradle.kts` or `settings.gradle`,
+// `gradle/libs.versions.toml` (the version catalog, read with toml.js) and the root's own
+// `build.gradle.kts` or `build.gradle`; then `gradle.lockfile` beside the build file, as
+// the lockfile.
 //
 // Performance: the tokenizer is one forward pass over charCodeAt with no regex over the
 // input and a 1 MiB cap (MAX_GRADLE_LENGTH); the matcher reads each token once, keeps
@@ -32,7 +33,19 @@
 //   build file's folder name (Gradle's own default).
 // - Only `dependencies { }` blocks are read, at any depth except inside `buildscript`;
 //   blocks named `if`, `else`, `for`, `while`, `forEach`, `let`, `run`, `also`, `with`
-//   and `try` are see-through. `constraints { }` inside it is not.
+//   and `try` are see-through. `constraints { }` and `dependencyManagement { }` give no
+//   rows; they pin versions (below).
+// - Inside `subprojects { }` or `allprojects { }` a row is tagged `every module` (after a
+//   `BOM` tag when it has one). A module's build file also takes those rows from the root
+//   build file, after its own, so a `g:a` the module declares keeps the module's row. An
+//   unreadable root build file adds nothing. `configure(subprojects…) { }` isn't read.
+// - Version pins: a coordinate with a version given to a configuration inside
+//   `constraints { }` or `dependencyManagement { }`, or to Spring's `dependency(…)`
+//   inside any `dependencies { }` (as `the<DependencyManagementExtension>().apply { }`
+//   writes it), fills in a `managed` row of the same `g:a`. A file's own pins come first,
+//   then the root's pins inside `subprojects { }` / `allprojects { }`. A BOM
+//   (`mavenBom(…)`, `platform(…)`) is never opened, so the versions it manages stay
+//   `managed`.
 // - Configurations: `implementation`, `api`, `compileOnly`, `runtimeOnly`, `kapt`, `ksp`,
 //   `annotationProcessor`, and the same names with a lower-case prefix
 //   (`testImplementation`, `debugApi`, `jvmMainImplementation`) or an upper-case suffix
@@ -68,10 +81,9 @@
 //   - A closure after a coordinate (`{ exclude(…) }`, `{ version { strictly(…) } }`) adds
 //     nothing.
 // - A duplicate `g:a` keeps its first row.
-// - A build file that declares no dependency at all and is the root's lists the
-//   `include(…)` projects from settings as rows tagged `subproject` (one per string,
-//   `include(":a", ":b")` or Groovy `include ':a', ':b'`; `includeBuild` is not read). A
-//   root that declares dependencies lists only those. The counts line counts the
+// - The root's build file lists the `include(…)` projects from settings as rows tagged
+//   `subproject`, after its own rows (one per string, `include(":a", ":b")` or Groovy
+//   `include ':a', ':b'`; `includeBuild` is not read). The counts line counts the
 //   subproject rows as directs.
 // - Kotlin: the language is "Kotlin" when `plugins { }` holds `kotlin("…")`, an `id`
 //   starting `org.jetbrains.kotlin.` (or `kotlin`, `kotlin-android`, `kotlin-kapt`), or
@@ -93,13 +105,14 @@ import { parseToml } from "./toml.js";
 export const MAX_GRADLE_LENGTH = 1 << 20; // characters
 const MAX_NESTING = 16; // calls inside calls before the rest is skipped
 export const GRADLE_RESOLVED_GROUP = "resolved";
+export const EVERY_MODULE = "every module"; // the tag on a `subprojects { }` or `allprojects { }` row
 
 export const GRADLE_COMPANIONS = {
   root: ["settings.gradle.kts", "settings.gradle"],
-  files: ["gradle/libs.versions.toml"],
+  files: ["gradle/libs.versions.toml", "build.gradle.kts", "build.gradle"],
 };
 
-export const GRADLE_NOTE = "No gradle.lockfile beside the build file; the full tree needs `gradle dependencies`, which this panel doesn't run.";
+export const GRADLE_NOTE = "Versions as declared. The resolved tree needs `gradle dependencies`, which this panel doesn't run.";
 
 const TAB = 9, LF = 10, CR = 13, SPACE = 32, QUOTE = 34, DOLLAR = 36, APOS = 39, STAR = 42, SLASH = 47,
   ZERO = 48, NINE = 57, UPPER_A = 65, UPPER_Z = 90, BACKSLASH = 92, UNDERSCORE = 95,
@@ -385,6 +398,8 @@ export function isConfiguration(name) {
 
 const DEV_CONFIGURATION = /^(test|androidTest)[A-Z]|Test[A-Z]|Test$/; // one identifier at a time
 const isTestLabel = (label) => label === "test" || label.endsWith("Test");
+const SHARED_BLOCKS = new Set(["subprojects", "allprojects"]);
+const PINNING_BLOCKS = new Set(["dependencyManagement", "constraints"]);
 
 // Walks the tokens once with a stack of block names, and reports what the matchers
 // need: dependency statements, plugin evidence, settings lines.
@@ -393,7 +408,8 @@ function walk(tokens, text) {
   // One frame per open `{`. Each frame carries what the matcher asks about it, worked
   // out once on push, so no question scans the stack: `block` is the nearest enclosing
   // labels that aren't see-through, `buildscript` and `test` whether any enclosing block
-  // is one.
+  // is one, `shared` whether one is `subprojects` or `allprojects`, and `pinning` whether
+  // one is `dependencyManagement` or `constraints`.
   const stack = [];
   const push = (labels) => {
     const parent = stack.at(-1);
@@ -402,14 +418,18 @@ function walk(tokens, text) {
       block: seeThrough ? parent?.block ?? null : labels,
       buildscript: Boolean(parent?.buildscript) || labels.includes("buildscript"),
       test: Boolean(parent?.test) || labels.some((l) => l !== "dependencies" && isTestLabel(l)),
+      shared: Boolean(parent?.shared) || labels.some((l) => SHARED_BLOCKS.has(l)),
+      pinning: Boolean(parent?.pinning) || labels.some((l) => PINNING_BLOCKS.has(l)),
     });
   };
-  const statements = [], plugins = [], includes = [];
+  const statements = [], pins = [], plugins = [], includes = [];
   let rootName = null;
 
   const block = () => stack.at(-1)?.block?.at(-1);
-  const inDependencies = () => block() === "dependencies" && !stack.at(-1).buildscript;
+  const inDependencies = () => block() === "dependencies" && !stack.at(-1).buildscript && !stack.at(-1).pinning;
+  const inPinning = () => Boolean(stack.at(-1)?.pinning) && !stack.at(-1).buildscript;
   const inTest = () => Boolean(stack.at(-1)?.test);
+  const inShared = () => Boolean(stack.at(-1)?.shared);
   const bareFollows = () => {
     const tok = r.peek();
     return Boolean(tok) && !tok.nl && (tok.t === "str" || tok.t === "id" || tok.t === "num");
@@ -458,11 +478,13 @@ function walk(tokens, text) {
 
     if (simple) {
       const fn = labels[0];
-      const wants = inDependencies() || fn === "id" || fn === "apply" || fn === "include";
+      const wants = inDependencies() || inPinning() || fn === "id" || fn === "apply" || fn === "include";
       const args = call ? call.args : wants && bareFollows() ? r.bareArgs() : null;
       if (args) {
         if (inDependencies() && isConfiguration(fn)) {
-          statements.push({ conf: fn, args, dev: DEV_CONFIGURATION.test(fn) || inTest() });
+          statements.push({ conf: fn, args, dev: DEV_CONFIGURATION.test(fn) || inTest(), shared: inShared() });
+        } else if ((inPinning() && isConfiguration(fn)) || (fn === "dependency" && (inPinning() || inDependencies()))) {
+          pins.push({ args, shared: inShared() });
         } else if (block() === "plugins") {
           if (fn === "kotlin" || fn === "id" || fn === "alias") plugins.push({ fn, args });
         } else if (fn === "apply") {
@@ -478,7 +500,7 @@ function walk(tokens, text) {
     }
     if (r.is(0, "p", "{")) { r.p++; push(labels); }
   }
-  return { statements, plugins, includes, rootName };
+  return { statements, pins, plugins, includes, rootName };
 }
 
 // --- the catalog -------------------------------------------------------------------
@@ -643,17 +665,40 @@ export function parseGradle(text, context, file = "build.gradle") {
   const root = context?.root ?? null, folder = context?.folder ?? null;
   const catalog = readVersionCatalog(files["gradle/libs.versions.toml"]);
   const settings = readSettings(files["settings.gradle.kts"] ?? files["settings.gradle"] ?? null);
-  const { statements, plugins } = walk(read.tokens, text);
+  const { statements, pins, plugins } = walk(read.tokens, text);
+  const isRoot = folder !== null && root === folder;
+
+  // A module also takes what the root build file declares for every module.
+  let inherited = { statements: [], pins: [] };
+  if (!isRoot && root !== null) {
+    const rootText = files["build.gradle.kts"] ?? files["build.gradle"] ?? null;
+    const rootRead = typeof rootText === "string" ? tokensOf(rootText, "root build file") : null;
+    if (rootRead && !rootRead.error) {
+      const r = walk(rootRead.tokens, rootText);
+      inherited = { statements: r.statements.filter((s) => s.shared), pins: r.pins.filter((p) => p.shared) };
+    }
+  }
 
   const deps = new Map(), skipped = [];
   const add = (dep) => { if (!deps.has(dep.name)) deps.set(dep.name, dep); };
+  const addShared = (dep) => add({ ...dep, marker: dep.marker ? `${dep.marker} · ${EVERY_MODULE}` : EVERY_MODULE });
   const skip = (name) => { if (!skipped.includes(name)) skipped.push(name); };
-  for (const statement of statements) readStatement(statement, catalog, add, skip);
+  for (const statement of [...statements, ...inherited.statements]) {
+    readStatement(statement, catalog, statement.shared ? addShared : add, skip);
+  }
 
-  const isRoot = folder !== null && root === folder;
-  let rows = [...deps.values()];
-  if (!statements.length && isRoot && settings?.includes.length) {
-    rows = settings.includes.map((name) => ({ name, constraint: null, dev: false, marker: "subproject" }));
+  // `managed` rows take a version pinned in the same build: this file's own pins, then
+  // the root's for every module.
+  const pinned = new Map();
+  for (const pin of [...pins, ...inherited.pins]) {
+    readStatement({ args: pin.args, dev: false }, catalog, (dep) => {
+      if (dep.constraint && dep.constraint !== "managed" && !pinned.has(dep.name)) pinned.set(dep.name, dep.constraint);
+    }, () => {});
+  }
+  let rows = [...deps.values()].map((dep) => (dep.constraint === "managed" && pinned.has(dep.name) ? { ...dep, constraint: pinned.get(dep.name) } : dep));
+  if (isRoot && settings?.includes.length) {
+    const own = new Set(rows.map((d) => d.name));
+    for (const name of settings.includes) if (!own.has(name)) rows.push({ name, constraint: null, dev: false, marker: "subproject" });
   }
   const name = folder === null ? null : (isRoot && settings?.name) || lastSegment(folder);
   const result = { name, deps: rows, skipped };

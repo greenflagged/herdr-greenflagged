@@ -189,7 +189,8 @@ Levels and labels come from the audit `status`:
   changes on the timer or ↻.
 - Never put the token in `localStorage` or draw it.
 - Never call `resolve_dep_tree` for this: it queues imports unless `autoRequest` is false.
-- A Gradle subproject reads `settings.gradle(.kts)` and `gradle/libs.versions.toml` from its build root,
+- A Gradle subproject reads `settings.gradle(.kts)`, `gradle/libs.versions.toml` and the root's build
+  file from its build root,
   above its own folder, so the panel watches the build root (`project.root`), not the subproject's
   folder. The walk to find that root never reads home, so the panel never watches home on its account.
   An unrelated settings file between the project and home is taken as the root, as Gradle itself
@@ -226,5 +227,7 @@ Levels and labels come from the audit `status`:
   dependencies with `dev`, `provided` and `runtime` tags, and the yellow Maven sentence. A Kotlin Gradle
   project shows "Not checked: Kotlin", its catalog dependencies resolved, the root project's name from
   the root folder and the subproject's folder name from a subproject folder, where the catalog still
-  resolves; a root that declares nothing lists its subprojects.
+  resolves. The root lists its subprojects after its own rows; a `subprojects { }` dependency is tagged
+  `every module` at the root and shows in each module too, and a version pinned by
+  `dependencyManagement { }` or `constraints { }` replaces `managed`.
 - A repo with both `package.json` and `pyproject.toml` still gets the npm audit.

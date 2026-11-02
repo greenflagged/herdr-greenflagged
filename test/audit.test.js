@@ -442,7 +442,7 @@ test("a subproject's build root is the nearest folder with a settings file, and 
     ...manifestReads,
     "/home/u/r/app/settings.gradle.kts", "/home/u/r/app/settings.gradle",
     "/home/u/r/settings.gradle.kts", "/home/u/r/settings.gradle",
-    "/home/u/r/gradle/libs.versions.toml",
+    "/home/u/r/gradle/libs.versions.toml", "/home/u/r/build.gradle.kts", "/home/u/r/build.gradle",
   ]);
 });
 
@@ -459,7 +459,7 @@ test("the walk for a build root never reads home", async () => {
   assert.deepEqual(companionReads, [
     "/home/u/r/app/settings.gradle.kts", "/home/u/r/app/settings.gradle",
     "/home/u/r/settings.gradle.kts", "/home/u/r/settings.gradle",
-    "/home/u/r/app/gradle/libs.versions.toml",
+    "/home/u/r/app/gradle/libs.versions.toml", "/home/u/r/app/build.gradle.kts", "/home/u/r/app/build.gradle",
   ]);
 });
 
@@ -467,7 +467,7 @@ test("with no settings file anywhere, the build file's folder is the root", asyn
   const { seen, read } = recording({ "/srv/p/build.gradle": "" });
   const project = await findManifest("/srv/p", "/Users/a", read);
   assert.equal(project.root, "/srv/p");
-  assert.equal(seen.at(-1), "/srv/p/gradle/libs.versions.toml");
+  assert.deepEqual(seen.slice(-3), ["/srv/p/gradle/libs.versions.toml", "/srv/p/build.gradle.kts", "/srv/p/build.gradle"]);
   assert.ok(!seen.includes("/settings.gradle.kts")); // `/` is never read for a root marker
 });
 
@@ -508,7 +508,7 @@ test("parse gets every companion name, null when missing, and both folders", asy
     await findManifest("/home/u/r/app", "/home/u", files({ "/home/u/r/app/build.gradle.kts": "", "/home/u/r/settings.gradle": "s" }));
   } finally { gradle.parse = original; }
   assert.deepEqual(calls, [{
-    files: { "settings.gradle.kts": null, "settings.gradle": "s", "gradle/libs.versions.toml": null },
+    files: { "settings.gradle.kts": null, "settings.gradle": "s", "gradle/libs.versions.toml": null, "build.gradle.kts": null, "build.gradle": null },
     root: "/home/u/r",
     folder: "/home/u/r/app",
   }]);

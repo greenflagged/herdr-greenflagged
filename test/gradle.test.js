@@ -213,7 +213,7 @@ kotlin-android = "org.jetbrains.kotlin.android:1.9.24"`);
 });
 
 test("an unknown alias, or no catalog at all, is a row named as written", () => {
-  assert.deepEqual(pairs(deps("implementation(libs.nope)\nimplementation(libs.bundles.nope)", at(kts.files))), [["libs.nope", null], ["libs.bundles.nope", null]]);
+  assert.deepEqual(pairs(deps("implementation(libs.nope)\nimplementation(libs.bundles.nope)", at(kts.files, "/r", "/r/app"))), [["libs.nope", null], ["libs.bundles.nope", null]]);
   assert.deepEqual(pairs(deps("implementation(libs.ktor.server.core)")), [["libs.ktor.server.core", null]]);
   assert.deepEqual(pairs(deps("implementation(libs.ktor.server.core)", at({ "gradle/libs.versions.toml": "not = [toml" }))), [["libs.ktor.server.core", null]]);
 });
@@ -237,12 +237,83 @@ test("the name is rootProject.name at the root, the folder's name elsewhere", ()
   assert.equal(parseGradle("").name, null);
 });
 
-test("a root build file that declares nothing lists its subprojects", () => {
+const SUBPROJECTS = [":app", ":core", ":web"].map((name) => ({ name, constraint: null, dev: false, marker: "subproject" }));
+
+test("a root build file lists its subprojects after its own dependencies", () => {
   const settings = { "settings.gradle.kts": kts.files["settings.gradle.kts"] };
-  const root = parseGradle("plugins { java }", at(settings));
-  assert.deepEqual(root.deps, [":app", ":core", ":web"].map((name) => ({ name, constraint: null, dev: false, marker: "subproject" })));
-  assert.deepEqual(parseGradle('dependencies { implementation("a:b:1") }', at(settings)).deps.map((d) => d.name), ["a:b"]);
+  assert.deepEqual(parseGradle("plugins { java }", at(settings)).deps, SUBPROJECTS);
+  assert.deepEqual(parseGradle('dependencies { implementation("a:b:1") }', at(settings)).deps,
+    [{ name: "a:b", constraint: "1", dev: false }, ...SUBPROJECTS]);
   assert.deepEqual(parseGradle("plugins { java }", at(settings, "/r", "/r/app")).deps, []);
+});
+
+// --- subprojects { }, allprojects { } and version pins ------------------------------------
+
+test("a root's subprojects { } and allprojects { } dependencies are tagged every module", () => {
+  const settings = { "settings.gradle.kts": kts.files["settings.gradle.kts"] };
+  const text = `subprojects {
+ dependencies { testImplementation(kotlin("test")) }
+}
+allprojects { dependencies { implementation(platform("g:bom:2")) } }
+dependencies { implementation("own:lib:1") }`;
+  assert.deepEqual(parseGradle(text, at(settings), "build.gradle.kts").deps, [
+    { name: "org.jetbrains.kotlin:kotlin-test", constraint: "managed", dev: true, marker: "every module" },
+    { name: "g:bom", constraint: "2", dev: false, marker: "BOM · every module" },
+    { name: "own:lib", constraint: "1", dev: false },
+    ...SUBPROJECTS,
+  ]);
+});
+
+test("a module takes the root build file's shared dependencies, and its own row wins", () => {
+  const root = `subprojects {
+ dependencies {
+  testImplementation(kotlin("test"))
+  implementation("g:both:1")
+ }
+}
+dependencies { implementation("root:only:1") }`;
+  for (const name of ["build.gradle.kts", "build.gradle"]) {
+    const files = { "settings.gradle.kts": 'include(":app")', [name]: root };
+    assert.deepEqual(parseGradle('dependencies { implementation("g:both:9") }', at(files, "/r", "/r/app")).deps, [
+      { name: "g:both", constraint: "9", dev: false },
+      { name: "org.jetbrains.kotlin:kotlin-test", constraint: "managed", dev: true, marker: "every module" },
+    ], name);
+  }
+  // An unreadable root build file adds nothing and doesn't spoil the module.
+  const broken = { "build.gradle.kts": 'subprojects { dependencies { implementation("never closed }' };
+  assert.deepEqual(pairs(parseGradle('dependencies { implementation("a:b:1") }', at(broken, "/r", "/r/app")).deps), [["a:b", "1"]]);
+});
+
+test("managed rows take a version pinned by dependencyManagement or constraints", () => {
+  const text = `dependencyManagement {
+ dependencies { dependency("org.jooq:jooq:3.19.21") }
+}
+the<io.spring.gradle.dependencymanagement.dsl.DependencyManagementExtension>().apply {
+ dependencies { dependency("dev.x:pkg:0.1.0") }
+}
+dependencies {
+ constraints { implementation("c:d:4") }
+ implementation("org.jooq:jooq")
+ implementation("dev.x:pkg")
+ implementation("c:d")
+ implementation("e:f")
+ implementation("org.jooq:jooq-meta:3.0")
+}`;
+  assert.deepEqual(pairs(parseGradle(text).deps), [["org.jooq:jooq", "3.19.21"], ["dev.x:pkg", "0.1.0"], ["c:d", "4"], ["e:f", "managed"], ["org.jooq:jooq-meta", "3.0"]]);
+  // Groovy, and a pin is never a row of its own.
+  const groovy = "dependencyManagement {\n dependencies {\n  dependency 'a:b:2'\n }\n}\ndependencies {\n implementation 'a:b'\n}";
+  assert.deepEqual(pairs(parseGradle(groovy).deps), [["a:b", "2"]]);
+  assert.deepEqual(parseGradle("dependencyManagement { dependencies { dependency('a:b:2') } }").deps, []);
+});
+
+test("a module takes the root's pins for every module, not the root's own", () => {
+  const root = `subprojects {
+ dependencyManagement { dependencies { dependency("a:shared:1") } }
+}
+dependencyManagement { dependencies { dependency("a:rootonly:1") } }`;
+  const files = { "build.gradle.kts": root };
+  assert.deepEqual(pairs(parseGradle('dependencies {\n implementation("a:shared")\n implementation("a:rootonly")\n}', at(files, "/r", "/r/app")).deps),
+    [["a:shared", "1"], ["a:rootonly", "managed"]]);
 });
 
 // --- Kotlin ------------------------------------------------------------------------------

@@ -85,8 +85,8 @@ Herdr first, then on that one, so you only need to sign in on one of them.
   `build.gradle` there too, `uv.lock` and `poetry.lock` beside a Python manifest, and
   `gradle.lockfile` beside a Gradle build file. For a Gradle build it also looks for
   `settings.gradle.kts` or `settings.gradle` in the build file's folder and the folders above it,
-  stopping below your home folder, and reads `gradle/libs.versions.toml` from the first folder that
-  has one. It reads `~/.npmrc`. It writes nothing to your project. Requests are remembered in
+  stopping below your home folder, and reads `gradle/libs.versions.toml`, `build.gradle.kts` and
+  `build.gradle` from the first folder that has one. It reads `~/.npmrc`. It writes nothing to your project. Requests are remembered in
   Herdr's `shared.json`.
 - **Programs:** it runs `printenv` to read your token, `xdg-open` or `open` when you click a row, and
   `npm login` when you click Sign in.
