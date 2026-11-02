@@ -370,7 +370,14 @@ export default class Greenflagged extends View {
   // Plain rows with no dots: the dots mean verdicts, and this tree gives none.
   treeBody(t, note) {
     if (!this.tree) return note(`Greenflagged doesn't check ${this.project.ecosystem.name} dependencies yet.`);
-    if (!this.tree.roots.length) return note(`No dependencies in ${this.project.ecosystem.file}.`);
+    // A file with no dependency tables at all (pyproject's `dynamic = ["dependencies"]`)
+    // may well have dependencies, declared somewhere this panel doesn't read.
+    if (!this.tree.roots.length) {
+      const file = this.project.ecosystem.file;
+      return note(this.project.undeclared
+        ? `No dependency tables in ${file}; dependencies declared elsewhere aren't read.`
+        : `No dependencies in ${file}.`);
+    }
     return v_flex().id("deps").flex_1().min_h(0).text_size(13).overflow_y_scrollbar()
       .children(visibleRows(this.tree, this.expanded).map((r) => this.treeRow(r, t)));
   }
@@ -385,6 +392,7 @@ export default class Greenflagged extends View {
       .child(div().w(10).flex_none().text_color(t.dim).text_size(11).child(node.loading ? "…" : expandable ? (open ? "▾" : "▸") : ""))
       .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(node.name))
       .child(div().flex_none().truncate().max_w(90).text_color(t.muted).text_size(11).child(node.version ?? node.constraint ?? ""))
+      .when(Boolean(node.marker), (el) => el.child(div().flex_none().truncate().max_w(110).text_color(t.muted).text_size(11).child(node.marker)))
       .when(node.dev, (el) => el.child(tag("dev")))
       .when(node.cycle, (el) => el.child(tag("(cycle)")));
   }

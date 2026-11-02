@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CHUNK, MAX_LOCK_CHARS, MAX_TREE_NODES, MAX_WALK_POPS, MAX_WALK_VISITS, NO_LOCKFILE_NOTE, buildTree, countsLine, expandNode, expandPaths,
-  keysOf, nodeKey, pathOf, treeForProject, visibleRows,
+  graphResolver, keysOf, mergeDirect, nodeKey, pathOf, treeForProject, visibleRows,
 } from "../mods/greenflagged/tree.js";
 
 // A resolver over a plain graph: { name: { version, children: [edge] } }.
@@ -432,4 +432,66 @@ test("treeForProject reopens saved rows, and a stale build leaves them alone", a
   const tree = await treeForProject(project([dep("a")]), lockOf(() => ({ resolve: over(graph) })), { expanded });
   assert.deepEqual([...expanded].map(readable), ["a"]);
   assert.deepEqual(tree.roots[0].children.map((n) => n.name), ["c"]);
+});
+
+// --- graphResolver and mergeDirect ---------------------------------------------
+
+const pkg = (name, version, dependencies = [], optional = {}) => ({ name, version, dependencies, optionalDependencies: new Map(Object.entries(optional)) });
+
+test("graphResolver finds name@version, and the first of a name in list order for an unversioned edge", () => {
+  const { resolve } = graphResolver([pkg("a", "1.0"), pkg("a", "2.0"), pkg("b", "1.0")]);
+  assert.equal(resolve({ name: "a", version: "2.0" }).version, "2.0");
+  assert.equal(resolve({ name: "a" }).version, "1.0");
+  assert.equal(resolve({ name: "a", version: "3.0" }), null);
+  assert.equal(resolve({ name: "missing" }), null);
+});
+
+test("graphResolver fills a child's version only when one version of it is locked", () => {
+  const { resolve } = graphResolver([pkg("root", "1", [{ name: "one" }, { name: "two" }]), pkg("one", "1.5"), pkg("two", "1"), pkg("two", "2")]);
+  assert.deepEqual(resolve({ name: "root" }).children, [{ name: "one", version: "1.5" }, { name: "two" }]);
+});
+
+test("graphResolver adds the optional dependencies an edge's extras ask for", () => {
+  const { resolve } = graphResolver([pkg("a", "1", [{ name: "b" }], { fast: [{ name: "c" }], other: [{ name: "d" }] }), pkg("b", "1"), pkg("c", "1")]);
+  assert.deepEqual(resolve({ name: "a" }).children.map((e) => e.name), ["b"]);
+  assert.deepEqual(resolve({ name: "a", extras: ["fast"] }).children.map((e) => e.name), ["b", "c"]);
+});
+
+test("mergeDirect takes the constraint and extras from the manifest and dev from the lock row", () => {
+  const manifest = [{ name: "a", constraint: ">=1", dev: true, extras: ["x"] }, { name: "gone", constraint: "*", dev: false }];
+  assert.deepEqual(mergeDirect(manifest, [{ name: "a", version: "1.0", marker: "m", dev: false }, { name: "b", version: "2.0", extras: ["y"], dev: true }]), [
+    { name: "a", version: "1.0", constraint: ">=1", marker: "m", extras: ["x"], dev: false },
+    { name: "b", version: "2.0", constraint: null, marker: null, extras: ["y"], dev: true },
+    { name: "gone", constraint: "*", dev: false },
+  ]);
+});
+
+each("a package under both dependencies and a dev group is one runtime row", async (wrap) => {
+  const direct = mergeDirect([], [{ name: "a", version: "1", dev: true }, { name: "a", version: "1", dev: false }]);
+  const tree = await buildTree(direct, wrap(() => ({ version: "1", children: [] })));
+  assert.equal(countsLine(tree), "1 direct, 1 total");
+  assert.equal(tree.roots[0].dev, false);
+});
+
+each("a row keeps the first marker among its edges, on roots and children", async (wrap) => {
+  const graph = { p: { version: "1", children: [{ name: "c", version: "1", constraint: ">=1", marker: "first" }, { name: "c", version: "1", constraint: "<2", marker: "second" }] } };
+  const tree = await buildTree([
+    { name: "p", version: "1", constraint: "*", dev: false },
+    { name: "p", version: "1", constraint: ">=0", dev: false, marker: "late" },
+  ], wrap((edge) => graph[edge.name] ?? { version: edge.version, children: [] }));
+  assert.equal(tree.roots.length, 1);
+  assert.equal(tree.roots[0].marker, "late");
+  await expandNode(tree, tree.roots[0], [tree.roots[0].key]);
+  assert.deepEqual(tree.roots[0].children.map((n) => [n.key, n.marker]), [["c@1", "first"]]);
+});
+
+test("treeForProject builds from a resolver's direct list when it has one", async () => {
+  const project = { deps: [dep("a")] };
+  const resolver = () => ({ resolve: () => null, direct: [{ name: "a", version: "1", constraint: "*", dev: false }, { name: "a", version: "2", constraint: "*", dev: false }] });
+  const tree = await treeForProject(project, { file: "x.lock", text: "", resolver });
+  assert.deepEqual(tree.roots.map((n) => n.key), ["a@1", "a@2"]);
+  const plain = await treeForProject(project, { file: "x.lock", text: "", resolver: () => ({ resolve: () => null }) });
+  assert.deepEqual(plain.roots.map((n) => n.key), ["a"]);
+  const bare = await treeForProject(project, { file: "x.lock", text: "", resolver: () => () => ({ version: "3", children: [] }) });
+  assert.deepEqual(bare.roots.map((n) => n.key), ["a@3"]);
 });
