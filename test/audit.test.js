@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  AUDIT_TTL_MS, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc,
+  AUDIT_TTL_MS, ECOSYSTEMS, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc,
 } from "../mods/greenflagged/audit.js";
 
 const toolReply = (result, extra = {}) => JSON.stringify({
@@ -45,6 +45,16 @@ test("findManifest names each unaudited language", async () => {
     const project = await findManifest("/r", "/Users/a", files({ [`/r/${file}`]: "" }));
     assert.equal(project.ecosystem.name, name, file);
   }
+});
+
+test("findManifest turns a parser that throws into the error state", async () => {
+  const go = ECOSYSTEMS.find((e) => e.file === "go.mod");
+  go.parse = () => { throw new Error("unexpected token"); };
+  try {
+    const project = await findManifest("/r", "/Users/a", files({ "/r/go.mod": "module x" }));
+    assert.equal(project.path, "/r/go.mod");
+    assert.equal(project.error, "go.mod could not be read: unexpected token");
+  } finally { delete go.parse; }
 });
 
 test("findManifest stops at home", async () => {

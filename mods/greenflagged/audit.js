@@ -79,10 +79,21 @@ export async function findManifest(cwd, home, read) {
       const i = texts.findIndex((text) => text !== null);
       if (i === -1) continue;
       const ecosystem = tier[i], path = `${folder}/${ecosystem.file}`;
-      return { folder, path, ecosystem, ...(ecosystem.parse?.(texts[i]) ?? {}) };
+      return { folder, path, ecosystem, ...parseSafely(ecosystem, texts[i]) };
     }
   }
   return null;
+}
+
+// A parser should answer { error } on bad input; one that throws gets the same
+// error state, rather than breaking the panel for every project.
+function parseSafely(ecosystem, text) {
+  if (!ecosystem.parse) return {};
+  try {
+    return ecosystem.parse(text) ?? {};
+  } catch (error) {
+    return { error: `${ecosystem.file} could not be read: ${String(error?.message ?? error)}` };
+  }
 }
 
 // Specs that never reach a registry, so a verdict on them would mean nothing.

@@ -81,10 +81,12 @@ Levels and labels come from the audit `status`:
   shaped like a boolean, integer, float or date-time is an error; date and time ranges aren't checked. Its
   tests run the valid cases of `toml-test`, vendored in `test/fixtures/toml-test/`.
 - `tree.js`: pure logic, the plain dependency tree for a language Greenflagged can't check. A language gets one
-  by giving its `ECOSYSTEMS` entry a `parse` and `lockfiles` resolvers; none has them yet. Rows are name and
+  by adding `parse` and `lockfiles` to its `ECOSYSTEMS` entry; no entry has them yet. Rows are name and
   version in `muted` with no dots, expanded one level at a time. A shared package expands under each parent,
-  a package already on its own path shows "(cycle)", "N direct, M total" counts each package once, and `dev`
-  marks a package reachable only through dev dependencies.
+  a package already on its own path shows "(cycle)", and "N direct, M total" counts each package once. `dev`
+  marks a package reachable only through dev dependencies. A resolver that skips the count walk
+  (`count: false`) can't tell, so then `dev` marks only the direct dependencies the manifest lists as dev.
+  Walks stop at a hard ceiling (`MAX_WALK_VISITS`, `MAX_WALK_POPS`) and a lockfile over 16 MB isn't parsed.
 - `main.js`: the `View`. From `herdr`: `spaces`, `panes`, `focused`, `exec`, `home`, `readTextFile`,
   `watchFolder`, `theme`. It runs `printenv`, `xdg-open` then `open` for links, and
   `npm login` through `run("tab.new", { name, argv, folder })`.

@@ -7,7 +7,7 @@ import {
   MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditRequest, cachedAudit, findBlock, findManifest, packageUrl, parseToolResponse, rememberRequest, requestCall, rows,
   storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
-import { buildTree, countsLine, expandNode, expandPaths, visibleRows } from "./tree.js";
+import { countsLine, expandNode, failedNote, treeForProject, visibleRows } from "./tree.js";
 
 const RECHECK_MS = 15 * 60 * 1000; // reviews finish on the registry's time, not ours
 const TOKEN_URL = "greenflagged.dev/account/tokens";
@@ -23,8 +23,6 @@ const DETACHED = "greenflagged.detached";
 const WIDTH = "greenflagged.width";
 const stopPress = (_e, cx) => cx.stop_propagation(); // a press that isn't stopped drags a detached window
 const REQUESTED = "greenflagged.requested"; // in shared state, so it outlives a restart
-const NO_LOCKFILE_NOTE = "No lockfile, so only direct dependencies are shown.";
-const failed = (file, error) => `Couldn't read ${file ?? "the lockfile"}: ${String(error?.message ?? error)}`;
 
 // The terminal in focus, or null when focus is on something with no folder, such
 // as this panel: clicking here must not change which project it shows.
@@ -159,21 +157,24 @@ export default class Greenflagged extends View {
         if (!project) { this.project = null; this.list = null; this.watched = null; return settle("none"); }
         if (project.error) { this.project = project; this.list = null; return settle("error", project.error); }
         this.watch(project, here.on, cx);
-        // The tree is built whenever it can be and drawn only for unaudited projects,
-        // so auditing a language later changes the view, not this plumbing.
-        if (project.path !== this.project?.path) { this.tree = null; this.treeSource = null; this.expanded = new Set(); }
-        const wantsTree = Array.isArray(project.deps) && (!project.ecosystem.audited || Boolean(project.ecosystem.lockfiles));
-        if (wantsTree) {
-          await this.buildProjectTree(project, here, run, cx);
-          if (run !== this.run) return;
-        } else { this.tree = null; this.treeSource = null; }
-        // No request for a language the registry can't check yet.
-        if (!project.ecosystem.audited) { this.project = project; this.list = null; return settle("unsupported"); }
+        const changedProject = project.path !== this.project?.path;
+        if (changedProject) { this.tree = null; this.treeSource = null; this.expanded = new Set(); }
+        // The tree is built and drawn only for unaudited projects. No request for a
+        // language the registry can't check yet.
+        if (!project.ecosystem.audited) {
+          this.project = project; this.list = null;
+          if (Array.isArray(project.deps)) {
+            if (changedProject) settle("loading"); // not the last project's view while the lockfile is read
+            await this.buildProjectTree(project, here, run, cx);
+            if (run !== this.run) return;
+          } else { this.tree = null; this.treeSource = null; }
+          return settle("unsupported");
+        }
+        this.tree = null; this.treeSource = null;
         // Saving package.json without touching its dependencies costs no request.
         const signature = JSON.stringify([here.on, project.path, project.deps]);
         const cached = force ? null : cachedAudit(this.audits, signature, Date.now());
         if (cached) { this.project = project; this.list = cached; return settle("ready"); }
-        const changedProject = project.path !== this.project?.path;
         this.project = project;
         if (changedProject) { this.list = null; settle("loading"); }
         if (!project.deps.length) { this.list = []; return settle("ready"); }
@@ -196,8 +197,7 @@ export default class Greenflagged extends View {
     });
   }
 
-  // A lockfile or walk failure keeps a direct-only tree and says why in a note; only
-  // a manifest that can't be read is the error state.
+  // Reads the first lockfile there is; `treeForProject` (tree.js) does the rest.
   async buildProjectTree(project, here, run, cx) {
     let lock = null;
     for (const l of project.ecosystem.lockfiles ?? []) {
@@ -208,25 +208,10 @@ export default class Greenflagged extends View {
     // The 15-minute timer and a save that changes nothing don't rebuild.
     const source = JSON.stringify([here.on, project.path, project.deps, lock?.file ?? null, lock?.text ?? null]);
     if (source === this.treeSource && this.tree) return;
-    let resolver = () => null, note = lock ? null : (project.ecosystem.note ?? NO_LOCKFILE_NOTE);
-    if (lock) {
-      try {
-        const made = lock.resolver(lock.text, project);
-        if (made.error) note = failed(lock.file, made.error); else resolver = made;
-      } catch (error) { note = failed(lock.file, error); }
-    }
-    let tree;
-    try {
-      tree = await buildTree(project.deps, resolver, { pause: () => cx.sleep(0) });
-    } catch (error) {
-      note = failed(lock?.file, error);
-      tree = await buildTree(project.deps, () => null);
-    }
-    if (run !== this.run) return;
-    tree.note = note;
-    tree.lockFile = lock?.file ?? null;
-    try { await expandPaths(tree, this.expanded); } catch (error) { tree.note ??= failed(tree.lockFile, error); }
-    if (run !== this.run) return;
+    const tree = await treeForProject(project, lock, {
+      noLockNote: project.ecosystem.note, expanded: this.expanded, pause: () => cx.sleep(0), stale: () => run !== this.run,
+    });
+    if (!tree || run !== this.run) return;
     this.tree = tree;
     this.treeSource = source;
   }
@@ -241,7 +226,7 @@ export default class Greenflagged extends View {
     cx.spawn(async (cx) => {
       try { await pending; } catch (error) {
         expanded.delete(path); // back to ▸, so the next click retries
-        if (this.tree === tree) tree.note = failed(tree.lockFile, error);
+        if (this.tree === tree) tree.note = failedNote(tree.lockFile, error);
       }
       if (this.tree === tree) cx.notify();
     });
@@ -398,7 +383,7 @@ export default class Greenflagged extends View {
       .when(expandable, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover))
         .on_mouse_down("left", stopPress).on_click((_e, cx) => this.toggle(row, cx)))
       .child(div().w(10).flex_none().text_color(t.dim).text_size(11).child(node.loading ? "…" : expandable ? (open ? "▾" : "▸") : ""))
-      .child(div().truncate().text_color(t.muted).child(node.name))
+      .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(node.name))
       .child(div().flex_none().truncate().max_w(90).text_color(t.muted).text_size(11).child(node.version ?? node.constraint ?? ""))
       .when(node.dev, (el) => el.child(tag("dev")))
       .when(node.cycle, (el) => el.child(tag("(cycle)")));

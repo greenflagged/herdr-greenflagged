@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  CHUNK, MAX_TREE_NODES, PATH_SEP, buildTree, countsLine, expandNode, expandPaths, nodeKey, visibleRows,
+  CHUNK, MAX_LOCK_CHARS, MAX_TREE_NODES, MAX_WALK_POPS, MAX_WALK_VISITS, NO_LOCKFILE_NOTE, buildTree, countsLine, expandNode, expandPaths,
+  keysOf, nodeKey, pathOf, treeForProject, visibleRows,
 } from "../mods/greenflagged/tree.js";
 
 // A resolver over a plain graph: { name: { version, children: [edge] } }.
@@ -15,18 +16,21 @@ function each(name, fn) {
 }
 
 const find = (nodes, name) => nodes.find((n) => n.name === name);
-const rowAt = (tree, expanded, path) => visibleRows(tree, expanded).find((r) => r.path === path);
+// Tests write a path as its keys joined by " > "; the tree stores it as pathOf(keys).
+const p = (readable) => pathOf(readable.split(" > "));
+const readable = (path) => keysOf(path).join(" > ");
+const rowAt = (tree, expanded, path) => visibleRows(tree, expanded).find((r) => r.path === p(path));
 
-// Expands the node at `path` (names joined by PATH_SEP, unversioned graphs only).
+// Expands the node at `path` (unversioned graphs only).
 async function open(tree, expanded, path) {
-  const keys = path.split(PATH_SEP);
+  const keys = path.split(" > ");
   let nodes = tree.roots, node;
   for (let i = 0; i < keys.length; i++) {
     node = nodes.find((n) => n.key === keys[i]);
     await expandNode(tree, node, keys.slice(0, i + 1));
     nodes = node.children;
   }
-  expanded.add(path);
+  expanded.add(p(path));
   return node;
 }
 
@@ -45,7 +49,7 @@ each("a diamond counts its shared package once and expands it under each parent"
   await open(tree, expanded, "a@1");
   await open(tree, expanded, "b@1");
   const rows = visibleRows(tree, expanded).filter((r) => r.node.name === "c");
-  assert.deepEqual(rows.map((r) => r.path), ["a@1 > c@1", "b@1 > c@1"]);
+  assert.deepEqual(rows.map((r) => readable(r.path)), ["a@1 > c@1", "b@1 > c@1"]);
   assert.ok(rows.every((r) => r.expandable && !r.node.cycle));
   assert.notEqual(rows[0].node, rows[1].node);
   await open(tree, expanded, "b@1 > c@1");
@@ -143,7 +147,7 @@ each("directs that resolve to one key become one root", async (wrap) => {
   assert.deepEqual(root.extras, ["bar"]);
   assert.equal(root.dev, false);
   assert.deepEqual(root.childEdges.map((e) => e.name).sort(), ["base", "extra"]);
-  assert.deepEqual(visibleRows(tree, new Set()).map((r) => r.path), ["foo@1"]);
+  assert.deepEqual(visibleRows(tree, new Set()).map((r) => readable(r.path)), ["foo@1"]);
 });
 
 each("a package's children follow the edge that reached it", async (wrap) => {
@@ -193,7 +197,7 @@ test("a declined count resolves only what is opened", async () => {
   assert.deepEqual(calls, ["a"]);
   await expandNode(tree, tree.roots[0], ["a"]);
   assert.deepEqual(calls.sort(), ["a", "b", "c"]);
-  const expanded = new Set(["a"]);
+  const expanded = new Set([p("a")]);
   visibleRows(tree, expanded);
   visibleRows(tree, expanded);
   await expandNode(tree, tree.roots[0], ["a"]);
@@ -285,19 +289,19 @@ test("expandPaths reopens saved rows after a rebuild and drops stale ones", asyn
 
   const tree3 = await buildTree([dep("a")], over(graph("2")));
   await expandPaths(tree3, expanded);
-  assert.deepEqual([...expanded], ["a"]);
+  assert.deepEqual([...expanded].map(readable), ["a"]);
   const rows = visibleRows(tree3, expanded);
-  assert.deepEqual(rows.map((r) => [r.path, r.open]), [["a", true], ["a > c@2", false]]);
+  assert.deepEqual(rows.map((r) => [readable(r.path), r.open]), [["a", true], ["a > c@2", false]]);
 });
 
 test("expandPaths builds a parent the saved set doesn't list", async () => {
   const graph = { a: { version: null, children: [{ name: "c" }] }, c: { version: null, children: [{ name: "d" }] }, d: { version: null, children: [] } };
   const tree = await buildTree([dep("a")], over(graph));
-  const expanded = new Set(["a > c"]);
+  const expanded = new Set([p("a > c")]);
   await expandPaths(tree, expanded);
-  assert.deepEqual([...expanded], ["a > c"]);
+  assert.deepEqual([...expanded].map(readable), ["a > c"]);
   assert.ok(tree.roots[0].children[0].children);
-  expanded.add("a");
+  expanded.add(p("a"));
   assert.ok(rowAt(tree, expanded, "a > c > d"));
 });
 
@@ -314,7 +318,7 @@ test("rows are sorted by name with depth, open state and paths", async () => {
   const tree = await buildTree([dep("b"), dep("a")], over(graph));
   const expanded = new Set();
   await open(tree, expanded, "b@2");
-  assert.deepEqual(visibleRows(tree, expanded).map((r) => [r.path, r.depth, r.open, r.expandable]), [
+  assert.deepEqual(visibleRows(tree, expanded).map((r) => [readable(r.path), r.depth, r.open, r.expandable]), [
     ["a@1", 0, false, false],
     ["b@2", 0, true, true],
     ["b@2 > y", 1, false, false],
@@ -324,7 +328,106 @@ test("rows are sorted by name with depth, open state and paths", async () => {
 
 test("constants and keys", () => {
   assert.equal(MAX_TREE_NODES, 2000);
-  assert.equal(PATH_SEP, " > ");
+  assert.equal(MAX_WALK_VISITS, 10 * MAX_TREE_NODES);
+  assert.equal(MAX_WALK_POPS, 100 * MAX_TREE_NODES);
   assert.equal(nodeKey("a", "1.0"), "a@1.0");
   assert.equal(nodeKey("a", null), "a");
+});
+
+test("a name holding ' > ' keeps its own path", async () => {
+  const graph = { "a > b": { version: null, children: [{ name: "x" }] }, a: { version: null, children: [{ name: "b" }] }, b: { version: null, children: [{ name: "y" }] }, x: { version: null, children: [] }, y: { version: null, children: [] } };
+  const tree = await buildTree([dep("a > b"), dep("a")], over(graph));
+  const weird = find(tree.roots, "a > b");
+  await expandNode(tree, weird, ["a > b"]);
+  const expanded = new Set([pathOf(["a > b"])]);
+  const rebuilt = await buildTree([dep("a > b"), dep("a")], over(graph));
+  await expandPaths(rebuilt, expanded);
+  assert.deepEqual([...expanded], [pathOf(["a > b"])]);
+  assert.deepEqual(find(rebuilt.roots, "a > b").children.map((n) => n.name), ["x"]);
+  assert.equal(find(rebuilt.roots, "a").children, null);
+});
+
+test("expandPaths keeps reopening after one path fails, then throws", async () => {
+  const graph = { a: { version: null, children: [{ name: "bad" }] }, b: { version: null, children: [{ name: "c" }] }, bad: { version: null, children: [] }, c: { version: null, children: [] } };
+  const resolve = (e) => (e.name === "bad" ? Promise.reject(new Error("read failed")) : graph[e.name] ?? null);
+  const tree = await buildTree([dep("a"), dep("b")], { resolve, count: false });
+  const expanded = new Set([p("a"), p("b")]);
+  await assert.rejects(expandPaths(tree, expanded), /read failed/);
+  assert.deepEqual([...expanded].map(readable), ["b"]);
+  assert.equal(find(tree.roots, "a").children, null);
+  assert.deepEqual(find(tree.roots, "b").children.map((n) => n.name), ["c"]);
+});
+
+test("expandPaths drops a saved path that isn't a key array", async () => {
+  const tree = await buildTree([dep("a")], over({ a: { version: null, children: [{ name: "b" }] } }));
+  const expanded = new Set(["a > b", "[]"]);
+  await expandPaths(tree, expanded);
+  assert.equal(expanded.size, 0);
+});
+
+each("the hard ceiling on visits stops both walks and marks the total capped", async (wrap) => {
+  const tree = await buildTree([dep("r1")], wrap(over(chain("r", 50))), { maxVisits: 10 });
+  assert.equal(tree.capped, true);
+  assert.equal(tree.total, 10);
+  assert.equal(countsLine(tree), "1 direct, 10+ total");
+});
+
+each("the hard ceiling on pops stops a dense walk", async (wrap) => {
+  const names = ["p", "q", "r"], graph = {};
+  for (const name of names) graph[name] = { version: null, children: Array.from({ length: 100 }, () => names.map((n) => ({ name: n }))).flat() };
+  const tree = await buildTree([dep("p")], wrap(over(graph)), { maxPops: 50 });
+  assert.equal(tree.capped, true);
+  assert.ok(tree.total <= 3);
+});
+
+// treeForProject is the glue main.js calls once it has read a lockfile.
+const project = (deps) => ({ deps });
+const lockOf = (resolver, text = "lock") => ({ file: "x.lock", text, resolver });
+
+test("treeForProject with no lockfile shows the directs and the no-lockfile note", async () => {
+  const tree = await treeForProject(project([dep("a"), dep("b", true)]), null);
+  assert.equal(tree.note, NO_LOCKFILE_NOTE);
+  assert.equal(tree.lockFile, null);
+  assert.deepEqual(tree.roots.map((n) => n.name), ["a", "b"]);
+  assert.equal((await treeForProject(project([dep("a")]), null, { noLockNote: "own note" })).note, "own note");
+});
+
+test("treeForProject walks the lockfile's resolver", async () => {
+  const graph = { a: { version: "1", children: [{ name: "c" }] }, c: { version: "2", children: [] } };
+  const seen = [];
+  const tree = await treeForProject(project([dep("a")]), lockOf((text, proj) => { seen.push(text, proj.deps.length); return { resolve: over(graph) }; }));
+  assert.deepEqual(seen, ["lock", 1]);
+  assert.equal(tree.note, null);
+  assert.equal(tree.lockFile, "x.lock");
+  assert.equal(countsLine(tree), "1 direct, 2 total");
+});
+
+test("treeForProject falls back to the directs with a note when the lockfile fails", async () => {
+  const cases = [
+    [() => ({ error: "bad header" }), /^Couldn't read x\.lock: bad header$/],
+    [() => { throw new Error("boom"); }, /^Couldn't read x\.lock: boom$/],
+    [() => ({ resolve: () => { throw new Error("deep"); } }), /^Couldn't read x\.lock: deep$/],
+  ];
+  for (const [resolver, note] of cases) {
+    const tree = await treeForProject(project([dep("a")]), lockOf(resolver));
+    assert.match(tree.note, note);
+    assert.deepEqual(tree.roots.map((n) => [n.name, n.leaf]), [["a", true]]);
+  }
+});
+
+test("treeForProject doesn't parse a lockfile over the size bound", async () => {
+  let called = false;
+  const tree = await treeForProject(project([dep("a")]), lockOf(() => { called = true; return { resolve: () => null }; }, "x".repeat(MAX_LOCK_CHARS + 1)));
+  assert.equal(called, false);
+  assert.equal(tree.note, "x.lock is too large to read, so only direct dependencies are shown.");
+});
+
+test("treeForProject reopens saved rows, and a stale build leaves them alone", async () => {
+  const graph = { a: { version: null, children: [{ name: "c" }] }, c: { version: null, children: [] } };
+  const expanded = new Set([p("a"), p("gone")]);
+  assert.equal(await treeForProject(project([dep("a")]), lockOf(() => ({ resolve: over(graph) })), { expanded, stale: () => true }), null);
+  assert.equal(expanded.size, 2);
+  const tree = await treeForProject(project([dep("a")]), lockOf(() => ({ resolve: over(graph) })), { expanded });
+  assert.deepEqual([...expanded].map(readable), ["a"]);
+  assert.deepEqual(tree.roots[0].children.map((n) => n.name), ["c"]);
 });

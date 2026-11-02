@@ -11,9 +11,14 @@
 // A node is built only when its parent is expanded, so a package several others
 // depend on costs nothing until someone opens it under each of them.
 
-export const MAX_TREE_NODES = 2000; // unique packages the dev-only walk may add before it stops
+export const MAX_TREE_NODES = 2000; // unique packages in total; once reached, the dev-only walk stops adding
+export const MAX_WALK_VISITS = 10 * MAX_TREE_NODES; // hard ceiling on (package, extras) visits across both walks
+export const MAX_WALK_POPS = 100 * MAX_TREE_NODES; // hard ceiling on edge pops across both walks
 export const CHUNK = 250; // edge pops (work-queue removals, seen or not) between calls to `pause`
-export const PATH_SEP = " > "; // no npm, PyPI, crates.io or Go name or version contains a space
+
+// A row's path is the JSON array of keys from its root, so a name can hold any text.
+export const pathOf = (keys) => JSON.stringify(keys);
+export const keysOf = (path) => JSON.parse(path);
 
 export const nodeKey = (name, version) => (version ? `${name}@${version}` : name);
 
@@ -85,11 +90,15 @@ async function resolveAll(resolve, edges) {
   }));
 }
 
-// Resolves the directs once each, merges directs that resolve to one key (the
-// runtime one wins over dev), then counts. Walk 1 runs from the runtime directs and
-// is never cut, so `runtime` is exact and a runtime package never wears the `dev`
-// tag. Walk 2 runs from the dev directs, and is the only walk the cap stops.
-export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, pause } = {}) {
+// Resolves each direct dependency once, then merges directs that resolve to the same
+// key (the runtime one wins over dev). Then it counts, in two walks.
+// Walk 1 starts from the runtime directs. The cap (MAX_TREE_NODES) never cuts it, so
+// `runtime` is exact and a runtime package never gets the `dev` tag.
+// Walk 2 starts from the dev directs. It is the only walk the cap can stop.
+// Both walks also stop at the hard ceilings (`maxVisits`, `maxPops`), which only a
+// pathological lockfile reaches. Then `capped` is set and `runtime` may be short, so
+// a runtime package past the ceiling can show as `dev`.
+export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, maxVisits = MAX_WALK_VISITS, maxPops = MAX_WALK_POPS, pause } = {}) {
   const counted = typeof resolver === "function" || resolver.count !== false;
   const resolve = memoize(typeof resolver === "function" ? resolver : resolver.resolve);
   const entries = group(await resolveAll(resolve, direct)).sort(byName);
@@ -97,16 +106,23 @@ export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, pause 
   if (counted) {
     const seen = new Set(entries.map((e) => e.key)), runtime = new Set(), visited = new Set();
     let pops = 0;
+    const ceiling = () => {
+      if (visited.size < maxVisits && pops < maxPops) return false;
+      tree.capped = true;
+      return true;
+    };
     const walk = async (starts, onKey) => {
       const stack = [];
       for (const entry of starts) {
         const id = visitId(entry.key, entry.extras);
         if (visited.has(id)) continue;
+        if (ceiling()) return;
         visited.add(id);
         onKey(entry.key);
         for (let i = entry.childEdges.length - 1; i >= 0; i--) stack.push(entry.childEdges[i]);
       }
       while (stack.length) {
+        if (ceiling()) return;
         const edge = stack.pop();
         pops++;
         if (pause && pops % CHUNK === 0) await pause();
@@ -164,22 +180,35 @@ export function expandNode(tree, node, keys) {
   return pending;
 }
 
-// Makes a saved set of expanded paths true on a (re)built tree: opens each path's
-// nodes, shortest paths first, and drops paths whose packages are gone (a version
-// change gives a new key) or can no longer expand.
+// Re-opens the saved expanded paths on a (re)built tree. It opens each path's nodes,
+// shortest paths first. It drops paths whose packages are gone (a version change
+// gives a new key) or can no longer expand. A path whose expansion fails is dropped
+// too, so its row draws ▸ and one click retries; the other paths still reopen, and
+// the first error is thrown once they have.
 export async function expandPaths(tree, expanded) {
-  const depth = (path) => path.split(PATH_SEP).length;
-  for (const path of [...expanded].sort((a, b) => depth(a) - depth(b))) {
-    const keys = path.split(PATH_SEP);
-    let nodes = tree.roots, found = true;
-    for (let i = 0; i < keys.length; i++) {
+  const saved = [...expanded].map((path) => {
+    try { return { path, keys: keysOf(path) }; } catch { return { path, keys: null }; }
+  });
+  let failure = null;
+  const broken = new Set(); // nodes whose expansion failed here, so deeper paths don't retry them
+  for (const { path, keys } of saved.sort((a, b) => (a.keys?.length ?? 0) - (b.keys?.length ?? 0))) {
+    let nodes = tree.roots, found = Array.isArray(keys) && keys.length > 0;
+    for (let i = 0; found && i < keys.length; i++) {
       const node = nodes.find((n) => n.key === keys[i]);
-      if (!node || node.leaf) { found = false; break; }
-      if (!node.children) await expandNode(tree, node, keys.slice(0, i + 1));
+      if (!node || node.leaf || broken.has(node)) { found = false; break; }
+      if (!node.children) {
+        try { await expandNode(tree, node, keys.slice(0, i + 1)); } catch (error) {
+          failure ??= { error };
+          broken.add(node);
+          found = false;
+          break;
+        }
+      }
       nodes = node.children;
     }
     if (!found) expanded.delete(path);
   }
+  if (failure) throw failure.error;
 }
 
 // The rows to draw, depth first. Recurses only into expanded rows whose children
@@ -188,7 +217,7 @@ export function visibleRows(tree, expanded) {
   const rows = [];
   const visit = (nodes, depth, parent) => {
     for (const node of nodes) {
-      const keys = [...parent, node.key], path = keys.join(PATH_SEP);
+      const keys = [...parent, node.key], path = pathOf(keys);
       const open = expanded.has(path) && Boolean(node.children) && !node.leaf;
       rows.push({ node, depth, path, keys, open, expandable: !node.leaf });
       if (open) visit(node.children, depth + 1, keys);
@@ -198,10 +227,45 @@ export function visibleRows(tree, expanded) {
   return rows;
 }
 
-// "N direct, M total". Capped, M is the lower bound the walks know, which can
-// exceed the cap because the runtime walk is never cut.
+// "N direct, M total". When a walk is stopped, M is only a lower bound: the packages
+// the walks found before stopping. M can still exceed the cap, because the cap never
+// cuts the runtime walk.
 export function countsLine(tree) {
   const direct = `${tree.roots.length} direct`;
   if (tree.total === null) return direct;
   return `${direct}, ${tree.total}${tree.capped ? "+" : ""} total`;
+}
+
+export const NO_LOCKFILE_NOTE = "No lockfile, so only direct dependencies are shown.";
+export const MAX_LOCK_CHARS = 16 * 1024 * 1024; // a bigger lockfile isn't parsed
+export const failedNote = (file, error) => `Couldn't read ${file ?? "the lockfile"}: ${String(error?.message ?? error)}`;
+
+// The tree for a project (`deps` from its ecosystem's `parse`), with `note` and
+// `lockFile` set. `lock` is { file, text, resolver } or null when no lockfile was
+// found. If the lockfile or the walk fails, the tree keeps only the directs and says
+// why in `note`. The error state is only for a manifest that can't be read, which
+// never gets here. `stale()` true after the walk means a newer refresh has started:
+// this returns null without touching `expanded`.
+export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_NOTE, expanded = new Set(), pause, stale = () => false } = {}) {
+  let resolver = () => null, note = lock ? null : noLockNote;
+  if (lock && lock.text.length > MAX_LOCK_CHARS) {
+    note = `${lock.file} is too large to read, so only direct dependencies are shown.`;
+  } else if (lock) {
+    try {
+      const made = lock.resolver(lock.text, project);
+      if (made?.error) note = failedNote(lock.file, made.error); else resolver = made;
+    } catch (error) { note = failedNote(lock.file, error); }
+  }
+  let tree;
+  try {
+    tree = await buildTree(project.deps, resolver, { pause });
+  } catch (error) {
+    note = failedNote(lock?.file, error);
+    tree = await buildTree(project.deps, () => null);
+  }
+  if (stale()) return null;
+  tree.note = note;
+  tree.lockFile = lock?.file ?? null;
+  try { await expandPaths(tree, expanded); } catch (error) { tree.note ??= failedNote(tree.lockFile, error); }
+  return tree;
 }
