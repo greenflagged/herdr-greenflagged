@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  AUDIT_TTL_MS, ECOSYSTEMS, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc,
+  AUDIT_TTL_MS, ECOSYSTEMS, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc, lastValidProject, staleNote,
 } from "../mods/greenflagged/audit.js";
 
 const toolReply = (result, extra = {}) => JSON.stringify({
@@ -24,7 +24,8 @@ test("findManifest takes the nearest folder with a manifest", async () => {
   assert.equal(project.path, "/Users/a/code/svc/go.mod");
   assert.equal(project.ecosystem.name, "Go");
   assert.equal(project.ecosystem.audited, false);
-  assert.equal(project.deps, undefined);
+  assert.equal(project.name, "svc");
+  assert.deepEqual(project.deps, []);
 });
 
 test("findManifest prefers an audited manifest within one folder", async () => {
@@ -49,12 +50,26 @@ test("findManifest names each unaudited language", async () => {
 
 test("findManifest turns a parser that throws into the error state", async () => {
   const go = ECOSYSTEMS.find((e) => e.file === "go.mod");
+  const original = go.parse;
   go.parse = () => { throw new Error("unexpected token"); };
   try {
     const project = await findManifest("/r", "/Users/a", files({ "/r/go.mod": "module x" }));
     assert.equal(project.path, "/r/go.mod");
     assert.equal(project.error, "go.mod could not be read: unexpected token");
-  } finally { delete go.parse; }
+  } finally { go.parse = original; }
+});
+
+test("the Go entry parses, declares go.mod as its own lockfile and carries a note", async () => {
+  const go = ECOSYSTEMS.find((e) => e.file === "go.mod");
+  assert.equal(go.audited, false);
+  assert.deepEqual(go.lockfiles.map((l) => l.file), ["go.mod"]);
+  assert.equal(typeof go.lockfiles[0].resolver, "function");
+  assert.match(go.note, /go\.mod/);
+  const text = "module example.com/svc\n\nrequire (\n\tgithub.com/a/b v1.2.0\n\tgithub.com/c/d v0.1.0 // indirect\n)\n";
+  const project = await findManifest("/r", "/Users/a", files({ "/r/go.mod": text }));
+  assert.equal(project.name, "example.com/svc");
+  assert.deepEqual(project.deps, [{ name: "github.com/a/b", version: "v1.2.0", constraint: "v1.2.0", dev: false }]);
+  assert.deepEqual(project.skipped, []);
 });
 
 test("findManifest stops at home", async () => {
@@ -360,4 +375,33 @@ test("tokenFromNpmrc reads a literal or resolves a variable", () => {
   assert.equal(tokenFromNpmrc("registry=x\n//greenflagged.dev/npm/:_authToken=${GREENFLAGGED_TOKEN}\n", env), "gflag_env");
   assert.equal(tokenFromNpmrc("//registry.npmjs.org/:_authToken=npm_x\n"), null);
   assert.equal(tokenFromNpmrc(null), null);
+});
+
+test("lastValidProject keeps the last valid read of the same file only", async () => {
+  const good = await findManifest("/r", "/Users/a", files({ "/r/package.json": '{"dependencies":{"a":"1"}}' }));
+  const bad = await findManifest("/r", "/Users/a", files({ "/r/package.json": "{ nope" }));
+  const other = await findManifest("/s", "/Users/a", files({ "/s/package.json": "{ nope" }));
+  assert.ok(bad.error);
+  assert.equal(lastValidProject(good, bad), good);
+  assert.equal(lastValidProject(good, other), null); // another project: nothing carried over
+  assert.equal(lastValidProject(bad, bad), null); // no valid read yet: the error alone
+  assert.equal(lastValidProject(null, bad), null);
+  assert.equal(lastValidProject(undefined, bad), null);
+});
+
+test("lastValidProject never carries a view across machines", async () => {
+  const good = await findManifest("/r", "/Users/a", files({ "/r/package.json": '{"dependencies":{"a":"1"}}' }));
+  const bad = await findManifest("/r", "/Users/a", files({ "/r/package.json": "{ nope" }));
+  const on = (project, machine) => ({ ...project, on: machine });
+  const boxGood = on(good, "box");
+  assert.equal(lastValidProject(boxGood, on(bad, "box")), boxGood); // same path, same machine
+  assert.equal(lastValidProject(boxGood, on(bad, "other")), null); // same path, another machine
+  assert.equal(lastValidProject(boxGood, on(bad, null)), null); // remote, then this machine
+  assert.equal(lastValidProject(boxGood, bad), null); // `on` missing counts as this machine
+  const hereGood = on(good, null);
+  assert.equal(lastValidProject(hereGood, bad), hereGood); // null and missing are both this machine
+});
+
+test("staleNote puts the parse error first and says the view is the last valid one", () => {
+  assert.equal(staleNote("go.mod line 7: x"), "go.mod line 7: x · showing the last valid version");
 });

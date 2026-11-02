@@ -1,6 +1,7 @@
 // Everything here is plain data in and out, with no Herdr imports, so `npm test`
 // can run it under Node without the app.
 
+import { GO_LOCKFILES, GO_NOTE, parseGoMod } from "./go.js";
 import { PYTHON_LOCKFILES, PYTHON_NOTE, parsePyproject, parseRequirements } from "./python.js";
 
 export const MCP_URL = "https://greenflagged.dev/mcp";
@@ -48,6 +49,10 @@ const LABELS = {
 //   lockfiles    -> [{ file, resolver(text, project) -> { resolve, count?, direct? } | { error } }], tried
 //                   in order in the manifest's folder; `resolve` is the contract in tree.js, and
 //                   `direct` replaces the manifest's directs when the lock records the project
+//                   (and may add a `group: true` heading row, as Go's "indirect" row does).
+//                   A manifest may be its own lockfile (Go lists go.mod), and is then read
+//                   twice. A resolver gets only the lock's text and the project: no file
+//                   reader and no machine, so it can't read further files today.
 //   note         -> shown instead of the no-lockfile sentence
 // Both Python entries share one base, so their lockfiles and note can't drift apart.
 const PYTHON = { id: "pypi", name: "Python", audited: false, lockfiles: PYTHON_LOCKFILES, note: PYTHON_NOTE };
@@ -56,7 +61,7 @@ export const ECOSYSTEMS = [
   { ...PYTHON, file: "pyproject.toml", parse: parsePyproject },
   { ...PYTHON, file: "requirements.txt", parse: parseRequirements },
   { id: "cargo", name: "Rust", file: "Cargo.toml", audited: false },
-  { id: "go", name: "Go", file: "go.mod", audited: false },
+  { id: "go", name: "Go", file: "go.mod", audited: false, parse: parseGoMod, lockfiles: GO_LOCKFILES, note: GO_NOTE },
 ];
 
 // Files whose change means the panel should look again: manifests and lockfiles.
@@ -97,6 +102,19 @@ export async function findManifest(cwd, home, read) {
   }
   return null;
 }
+
+// Returns the last valid project for the same file on the same machine as `failed`, or
+// null when there is none (a different file, another machine, or no valid read yet). A
+// manifest being edited is often malformed for a moment, so on a parse error the panel
+// keeps showing that last valid project, dimmed and marked stale. A project's machine is
+// its `on` field: null means this machine, and the panel sets it after findManifest. The
+// panel holds the last valid project in memory only; it is lost when the project changes
+// or the panel closes.
+export function lastValidProject(previous, failed) {
+  if (!previous || previous.error || !failed) return null;
+  return previous.path === failed.path && (previous.on ?? null) === (failed.on ?? null) ? previous : null;
+}
+export const staleNote = (error) => `${error} · showing the last valid version`;
 
 // A parser should answer { error } on bad input; one that throws gets the same
 // { error } result, so findManifest still returns the project and its message names

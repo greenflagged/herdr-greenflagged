@@ -4,10 +4,10 @@ import {
   closeOverlay, exec, focused, home, layout, openOverlay, panes, props, readTextFile, run, setShared, shared, spaces, theme, watchFolder,
 } from "herdr";
 import {
-  MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditRequest, cachedAudit, findBlock, findManifest, packageUrl, parseToolResponse, rememberRequest, requestCall, rows,
-  storeAudit, summarize, tokenFromNpmrc, withRequests,
+  MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditRequest, cachedAudit, findBlock, findManifest, lastValidProject, packageUrl, parseToolResponse, rememberRequest, requestCall, rows,
+  staleNote, storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
-import { countsLine, expandNode, failedNote, treeForProject, visibleRows } from "./tree.js";
+import { countsLine, directRoots, expandNode, failedNote, treeForProject, visibleRows } from "./tree.js";
 
 const RECHECK_MS = 15 * 60 * 1000; // reviews finish on the registry's time, not ours
 const TOKEN_URL = "greenflagged.dev/account/tokens";
@@ -146,18 +146,31 @@ export default class Greenflagged extends View {
     const run = (this.run ?? 0) + 1;
     this.run = run;
     cx.spawn(async (cx) => {
-      const settle = (state, message) => {
+      const settle = (state, message, stale = false) => {
         if (run !== this.run) return;
-        this.state = state; this.message = message ?? null;
+        this.state = state; this.message = message ?? null; this.stale = stale;
         cx.notify();
       };
       try {
         const project = await findManifest(here.cwd, home(), (path) => readTextFile(path, { on: here.on }).catch(() => null));
         if (run !== this.run) return;
+        // Record the machine, so the last valid view is never shown for a different machine.
+        if (project) project.on = here.on ?? null;
         if (!project) { this.project = null; this.list = null; this.watched = null; return settle("none"); }
-        if (project.error) { this.project = project; this.list = null; return settle("error", project.error); }
+        // Watched even when malformed, so fixing the file refreshes the panel.
         this.watch(project, here.on, cx);
-        const changedProject = project.path !== this.project?.path;
+        if (project.error) {
+          // Mid-edit: keep the last valid list or tree of this file on this machine, dimmed,
+          // with the error over it.
+          const last = lastValidProject(this.project, project);
+          if (last && (last.ecosystem.audited ? this.list : this.tree)) {
+            return settle(last.ecosystem.audited ? "error" : "unsupported", staleNote(project.error), true);
+          }
+          if (project.path !== this.project?.path || project.on !== this.project?.on) { this.tree = null; this.treeSource = null; this.expanded = new Set(); }
+          this.project = project; this.list = null;
+          return settle("error", project.error);
+        }
+        const changedProject = project.path !== this.project?.path || project.on !== this.project?.on;
         if (changedProject) { this.tree = null; this.treeSource = null; this.expanded = new Set(); }
         // The tree is built and drawn only for unaudited projects. No request for a
         // language the registry can't check yet.
@@ -297,7 +310,7 @@ export default class Greenflagged extends View {
   }
 
   row(item, t) {
-    const color = { blocked: t.ansi1, attention: t.ansi3, ok: t.ansi2 }[item.level];
+    const color = this.stale ? t.dim : { blocked: t.ansi1, attention: t.ansi3, ok: t.ansi2 }[item.level];
     const wanted = item.version && item.version !== item.constraint ? ` → ${item.version}` : "";
     const failure = this.requestErrors.get(item.name);
     return v_flex().id(`dep-${item.name}`).px(10).py(3).gap(1).cursor_pointer().hover((s) => s.bg(t.hover))
@@ -308,7 +321,7 @@ export default class Greenflagged extends View {
       }))
       .child(h_flex().gap(6).items_center()
         .child(div().w(7).h(7).rounded(4).bg(color))
-        .child(div().flex_1().truncate().text_color(t.foreground).child(item.name))
+        .child(div().flex_1().truncate().text_color(this.stale ? t.dim : t.foreground).child(item.name))
         .when(item.dev, (el) => el.child(div().text_color(t.dim).text_size(11).child("dev")))
         .child(this.status(item, color, t)))
       .child(div().pl(13).truncate().text_color(t.dim).text_size(11).child(`${item.constraint}${wanted}`))
@@ -359,7 +372,7 @@ export default class Greenflagged extends View {
     const flagged = list.filter((r) => r.level !== "ok"), ok = list.filter((r) => r.level === "ok");
     const items = flagged.map((r) => this.row(r, t));
     if (ok.length) {
-      items.push(div().id("toggle-ok").px(10).py(5).text_size(12).text_color(t.muted).hover((s) => s.bg(t.hover))
+      items.push(div().id("toggle-ok").px(10).py(5).text_size(12).text_color(this.stale ? t.dim : t.muted).hover((s) => s.bg(t.hover))
         .on_mouse_down("left", stopPress).on_click((_e, cx) => { this.showOk = !this.showOk; cx.notify(); })
         .child(`${this.showOk ? "▾" : "▸"} ${ok.length} greenflagged`));
     }
@@ -390,9 +403,9 @@ export default class Greenflagged extends View {
       .when(expandable, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover))
         .on_mouse_down("left", stopPress).on_click((_e, cx) => this.toggle(row, cx)))
       .child(div().w(10).flex_none().text_color(t.dim).text_size(11).child(node.loading ? "…" : expandable ? (open ? "▾" : "▸") : ""))
-      .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(node.name))
-      .child(div().flex_none().truncate().max_w(90).text_color(t.muted).text_size(11).child(node.version ?? node.constraint ?? ""))
-      .when(Boolean(node.marker), (el) => el.child(div().flex_none().truncate().max_w(110).text_color(t.muted).text_size(11).child(node.marker)))
+      .child(div().flex_1().min_w(0).truncate().text_color(node.group || this.stale ? t.dim : t.muted).child(node.name))
+      .child(div().flex_none().truncate().max_w(90).text_color(this.stale ? t.dim : t.muted).text_size(11).child(node.version ?? node.constraint ?? ""))
+      .when(Boolean(node.marker), (el) => el.child(div().flex_none().truncate().max_w(110).text_color(this.stale ? t.dim : t.muted).text_size(11).child(node.marker)))
       .when(node.dev, (el) => el.child(tag("dev")))
       .when(node.cycle, (el) => el.child(tag("(cycle)")));
   }
@@ -408,10 +421,10 @@ export default class Greenflagged extends View {
       .size_full().bg(t.surface).items_center().py(8).gap(8)
       .child(this.control("expand", "‹", t.muted, t, () => this.expand(block)))
       .when(Boolean(counts), (el) => el
-        .child(count(counts.blocked, t.ansi1))
-        .child(count(counts.attention, t.ansi3))
-        .child(count(counts.ok, t.ansi2)))
-      .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(count(this.tree.roots.length, t.dim)))
+        .child(count(counts.blocked, this.stale ? t.dim : t.ansi1))
+        .child(count(counts.attention, this.stale ? t.dim : t.ansi3))
+        .child(count(counts.ok, this.stale ? t.dim : t.ansi2)))
+      .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(count(directRoots(this.tree).length, t.dim)))
       .child(div().id("rail-label").flex_none().pt(4).cursor_pointer().text_color(t.muted).hover((s) => s.text_color(t.foreground))
         .on_mouse_down("left", stopPress).on_click(() => this.expand(block))
         .child(svg(`mods/${MOD}/label.svg`).w(14).h(83).text_color(t.muted)));
@@ -443,14 +456,17 @@ export default class Greenflagged extends View {
               : el
                 .child(this.control("detach", "↗", t.muted, t, () => this.detach(block)))
                 .child(this.control("collapse", "›", t.muted, t, (_e, cx) => this.collapse(block, cx))))))
+        // A stale view is dimmed, so an old "all clear" can't read as current.
         .when(Boolean(counts), (el) => el.child(h_flex().gap(10)
-          .child(pill(counts.ok, t.ansi2, "ok"))
-          .child(pill(counts.attention, t.ansi3, "attention"))
-          .child(pill(counts.blocked, t.ansi1, "blocked"))))
+          .child(pill(counts.ok, this.stale ? t.dim : t.ansi2, "ok"))
+          .child(pill(counts.attention, this.stale ? t.dim : t.ansi3, "attention"))
+          .child(pill(counts.blocked, this.stale ? t.dim : t.ansi1, "blocked"))))
         .when(this.state === "unsupported" && Boolean(this.project), (el) => el.child(
           div().text_size(12).text_color(t.muted).child(`Not checked: ${this.project.ecosystem.name}`)))
         .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(
           div().text_size(12).text_color(t.dim).child(countsLine(this.tree))))
+        .when(this.state === "unsupported" && Boolean(this.message), (el) => el.child(
+          div().text_size(11).text_color(t.ansi1).child(this.message)))
         .when(this.state === "unsupported" && Boolean(this.tree?.note), (el) => el.child(
           div().text_size(11).text_color(t.ansi3).child(this.tree.note)))
         .when(Boolean(this.project?.ecosystem.audited) && this.project.deps?.length > MAX_ENTRIES, (el) => el.child(
