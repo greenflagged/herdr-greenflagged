@@ -47,8 +47,9 @@ Levels and labels come from the audit `status`:
   dependencies, read from `uv.lock` or `poetry.lock` beside the manifest when there is one. A Go project
   shows a plain tree read from `go.mod` (direct modules, an "indirect" group, `replace` applied), and
   each module row opens into the modules its own go.mod requires, read from Go's module cache
-  (`cache/lock`, and `.mod` files under `cache/download/`) only when the row opens; `go.js`'s header
-  lists the edge cases. It also looks for `pom.xml`, then `build.gradle.kts`, then
+  (`cache/lock`, and `.mod` files under `cache/download/`). A `.mod` is read when its row opens; the
+  one exception is the build-time probe, which reads the first module's `.mod` when `cache/lock` is
+  missing. `go.js`'s header lists the edge cases. It also looks for `pom.xml`, then `build.gradle.kts`, then
   `build.gradle` (Java/Kotlin, after `go.mod`). A Maven project shows its POM's direct dependencies
   (`maven.js`'s header lists the edge cases) and a sentence saying the full tree needs
   `mvn dependency:tree`, which the panel doesn't run. A Gradle project shows the dependencies its build
@@ -124,19 +125,19 @@ Levels and labels come from the audit `status`:
   cases.
 - `go.js`: pure logic, Go's half of the tree: `go.mod` read line by line into direct and indirect
   modules with `replace` applied. It runs nothing (no `go mod graph`). Its lockfile entry declares Go's
-  module cache, and each module row opens, when clicked, into the requires of its cached `.mod` file,
-  at the versions the project's `go.mod` selects. Paths are escaped as Go does and checked against an
-  allowlist before any file path is built. A module whose `.mod` isn't cached is a leaf tagged
-  `not downloaded`; with no cache at all the tree is flat with a yellow note. `go.mod` is also its
-  lockfile.
+  module cache. When you click a module row, it opens into the modules listed in the `require` lines
+  of that module's cached `.mod` file, at the versions the project's `go.mod` selects. Paths are
+  escaped as Go does and checked against an allowlist before any file path is built. A module whose
+  `.mod` isn't cached is a leaf tagged `not downloaded`; with no cache at all the tree is flat with a
+  yellow note. `go.mod` is also its lockfile. A malformed `go.mod` is refused with an error naming the
+  line ("go.mod line 7: …"), never read in part. "Malformed" is a check on the file's shape only, and
+  it can be wrong both ways: a `go.mod` that passes may be one Go rejects (`exclude a`), and one Go
+  accepts may be refused (`tool v1.0.0` inside a `require` block). `go.js`'s header lists the Go edge
+  cases and the full definition.
 - `cache.js`: pure logic, ecosystem-neutral: finds a lockfile entry's declared cache folder from
   environment variables or the home folder, and reads through a reader confined to the declared probe
-  file and the `suffix` files under its `under` folder, with a per-session memo of what it read. Its
-  header lists the declaration contract and the two gates. A malformed `go.mod` is refused with an error
-  naming the line ("go.mod line 7: …"), never read in part. "Malformed" is a check on the file's
-  shape only, and it can be wrong both ways: a `go.mod` that passes may be one Go rejects (`exclude
-  a`), and one Go accepts may be refused (`tool v1.0.0` inside a `require` block). Its header lists
-  the Go edge cases and the full definition.
+  file and the `suffix` files under its `under` folder, with a per-session memo of what it read.
+  `cache.js`'s header lists the declaration contract and the two gates.
 - `xml.js`: pure logic, a small XML reader for `pom.xml`: elements, text, comments and CDATA, in one
   linear pass with a 1 MiB cap. It refuses `<!DOCTYPE`, `<!ENTITY` and any entity beyond the five
   predefined ones and numeric references, so it never fetches a DTD or expands an entity. Its header
@@ -150,8 +151,8 @@ Levels and labels come from the audit `status`:
   "resolved" group like Go's "indirect". It runs no `gradle` and reads no `~/.gradle`. Its header lists
   the forms it matches and the Gradle edge cases, and records its Node timing.
 - `main.js`: the `View`. From `herdr`: `spaces`, `panes`, `focused`, `exec`, `home`, `readTextFile`,
-  `watchFolder`, `theme`. It runs `printenv` (the token, and `GOMODCACHE`, `GOPATH` and `HOME` on the
-  project's machine to find Go's module cache), `xdg-open` then `open` for links, and
+  `watchFolder`, `theme`. It runs `printenv` (the token, and `GOMODCACHE` and `GOPATH` on the
+  project's machine to find Go's module cache, plus `HOME` when that machine is remote), `xdg-open` then `open` for links, and
   `npm login` through `run("tab.new", { name, argv, folder })`.
 - The audit is one JSON-RPC `tools/call` of `audit_manifest` by `POST https://greenflagged.dev/mcp` with
   `Authorization: Bearer <token>`. The endpoint is stateless, so there is no `initialize`. The answer

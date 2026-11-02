@@ -18,8 +18,10 @@
 // refresh is consistent.
 //
 // Module cache edge cases:
-// - A `.mod` file is read only when its row opens, once per session (cache.js keeps the
-//   text), so a first build with nothing open reads only the probe.
+// - Outside the probe (below), a `.mod` file is read only when its row opens. cache.js keeps texts up to
+//   16 Ki chars for the session, so such a `.mod` is read once; a longer one is read
+//   again each time. A first build with nothing open reads only `cache/lock`, plus the
+//   first module's `.mod` when `cache/lock` is missing (the probe fallback below).
 // - Children show the version the project's go.mod selects for that path, not the one
 //   the `.mod` asks for, which stays the row's constraint. Since Go 1.17 a tidy go.mod
 //   lists every module in the build; a module it doesn't list shows the version asked
@@ -36,11 +38,13 @@
 // - Paths and versions are third-party data. Each is escaped as Go does (an uppercase
 //   letter becomes `!` and the lowercase letter) and checked against an allowlist before
 //   any file path is built; cache.js checks the relative path again before reading.
-// - No cache folder, or one with neither `cache/lock` nor the first module's `.mod`,
+// - The probe: `cache/lock`, and when that is missing, the first module's `.mod` (read
+//   at build time, bypassing the memo). No cache folder, or one with neither file,
 //   gives the flat view with GO_NO_CACHE_NOTE; a probe read that fails gives the flat
 //   view with the reason. ↻ and the 15-minute timer rebuild either (tree.cacheBacked).
-// - The folder comes from GOMODCACHE, GOPATH and HOME as `printenv` sees them on the
-//   project's machine. A GOMODCACHE set with `go env -w` (Go's own env file) isn't read;
+// - The folder comes from GOMODCACHE and GOPATH as `printenv` sees them on the
+//   project's machine, then the home folder (Herdr's own for a local project, HOME
+//   from `printenv` on a remote one). A GOMODCACHE set with `go env -w` (Go's own env file) isn't read;
 //   if an old ~/go/pkg/mod still holds a `cache/lock`, that stale cache is read instead.
 // - "M total" stays go.mod's module count: the cache view loads children lazily and
 //   never walks the whole graph.

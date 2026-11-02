@@ -264,9 +264,14 @@ export default class Greenflagged extends View {
     if (node.children) return cx.notify();
     const pending = expandNode(tree, node, keys);
     cx.spawn(async (cx) => {
-      try { await pending; } catch (error) {
+      // A failure names the row's module (its file is in a cache, not the lockfile), and
+      // that note goes once a later open succeeds.
+      try {
+        await pending;
+        if (this.tree === tree && tree.note && tree.note === tree.expandNote) tree.note = tree.expandNote = null;
+      } catch (error) {
         expanded.delete(path); // back to ▸, so the next click retries
-        if (this.tree === tree) tree.note = failedNote(tree.lockFile, error);
+        if (this.tree === tree) tree.note = tree.expandNote = failedNote([node.name, node.version].filter(Boolean).join(" ") || tree.lockFile, error);
       }
       if (this.tree === tree) cx.notify();
     });
