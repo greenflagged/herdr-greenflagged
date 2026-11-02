@@ -5,10 +5,24 @@
 // direct:     [{ name, constraint, dev, version?, extras?, marker?, group? }]   an ecosystem's `parse` output
 // edge:       { name, version?, constraint?, extras?, marker? }         what a resolver hands back as children
 // resolve:    (edge) -> Resolution | null, or a Promise of one
-// Resolution: { version: string | null, children: edge[] }
-// resolver:   resolve, or { resolve, count?: boolean, direct?: direct[] }; `count: false` skips the
-//             count walk, and `direct` replaces the manifest's directs when the lockfile knows them
-//             better (one row per locked version of a split dependency, say)
+// Resolution: { version: string | null, children: edge[] } | { version, deferred: true }
+// resolver:   resolve, or { resolve, count?: boolean, direct?: direct[], load?, total?, note? };
+//             `count: false` skips the count walk, and `direct` replaces the manifest's directs
+//             when the lockfile knows them better (one row per locked version of a split
+//             dependency, say)
+// load:       (edge) -> Promise<{ children: edge[], tag?: string }>, the children of a
+//             `deferred` resolution, asked for the first time its row opens
+// total:      the "M total" figure for a resolver that sets `count: false`
+// note:       a sentence treeForProject shows as the tree's note (a fallback, say)
+//
+// A deferred resolution draws its row expandable without knowing its children: reading
+// them costs something (a file from a cache, say), so it is paid only when the row
+// opens. `load` is memoized per name@version like `resolve`: answers are kept, and a
+// rejection is dropped so the next click retries. A `load` with no children turns the
+// row into a leaf carrying `tag` (fixed text, such as `not downloaded`). A resolver that
+// defers must set `count: false`: the count walk can't see deferred children, so every
+// child it never reached would otherwise be tagged `dev`. A resolver without `deferred`,
+// `load`, `total` or `note` takes exactly the path it always took.
 //
 // `marker` is row metadata, never identity: rows merge on name@version, and a merged
 // row shows the first non-null marker among its edges. Child edges that differ only in
@@ -70,6 +84,22 @@ function memoize(resolve) {
   };
 }
 
+// `load`, memoized per name@version. Answers are kept; a rejection is dropped from the
+// memo, so the next call tries again.
+function memoizeLoad(load) {
+  const cache = new Map();
+  return (edge) => {
+    const id = JSON.stringify([edge.name, edge.version ?? null]);
+    const hit = cache.get(id);
+    if (hit) return hit;
+    let pending;
+    try { pending = Promise.resolve(load(edge)); } catch (error) { return Promise.reject(error); }
+    pending = pending.catch((error) => { if (cache.get(id) === pending) cache.delete(id); throw error; });
+    cache.set(id, pending);
+    return pending;
+  };
+}
+
 // Groups resolved edges by key: duplicates become one entry whose extras and child
 // edges are the union, so row ids are unique at every level by construction.
 function group(resolved) {
@@ -82,11 +112,13 @@ function group(resolved) {
     if (!entry) {
       entry = {
         name: edge.name, version, constraint: edge.constraint ?? null, marker: edge.marker ?? null, key, group: isGroup, extras: new Set(), edges: new Map(), dev: true,
+        deferred: false,
       };
       byKey.set(key, entry);
     }
     entry.constraint ??= edge.constraint ?? null;
     entry.marker ??= edge.marker ?? null;
+    if (resolution?.deferred === true) entry.deferred = true;
     for (const extra of edge.extras ?? []) entry.extras.add(extra);
     for (const child of resolution?.children ?? []) {
       const id = edgeId(child), seen = entry.edges.get(id);
@@ -100,9 +132,11 @@ function group(resolved) {
 
 function makeNode(entry, { dev, cycle = false }) {
   const childEdges = cycle ? [] : entry.childEdges;
+  const deferred = !cycle && entry.deferred === true;
   return {
     name: entry.name, version: entry.version, constraint: entry.constraint, marker: entry.marker, dev, key: entry.key, extras: entry.extras, group: entry.group,
-    cycle, leaf: cycle || childEdges.length === 0, loading: false, children: cycle ? [] : null, childEdges, pending: null,
+    cycle, leaf: cycle || (childEdges.length === 0 && !deferred), loading: false, children: cycle ? [] : null, childEdges, pending: null,
+    deferred, tag: null,
   };
 }
 
@@ -127,7 +161,9 @@ export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, maxVis
   const counted = typeof resolver === "function" || resolver.count !== false;
   const resolve = memoize(typeof resolver === "function" ? resolver : resolver.resolve);
   const entries = group(await resolveAll(resolve, direct)).sort(byName);
-  const tree = { roots: [], total: null, capped: false, runtime: null, resolve, counted };
+  const load = typeof resolver !== "function" && typeof resolver.load === "function" ? memoizeLoad(resolver.load) : null;
+  const tree = { roots: [], total: null, capped: false, runtime: null, resolve, load, counted };
+  if (!counted && Number.isFinite(resolver.total)) tree.total = resolver.total;
   if (counted) {
     const seen = new Set(entries.filter((e) => !e.group).map((e) => e.key)), runtime = new Set(), visited = new Set();
     let pops = 0;
@@ -177,7 +213,9 @@ export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, maxVis
 }
 
 // Builds `node.children` once, one level only. `keys` is the root path including
-// the node; a child already on it is a cycle and doesn't expand. `loading` and the
+// the node; a child already on it is a cycle and doesn't expand. A deferred node asks
+// the resolver's `load` for its child edges first; none makes it a leaf with `tag`.
+// `loading` and the
 // pending promise are set before anything is awaited, so a caller can draw the
 // loading state straight away; a concurrent call gets the same promise. On failure
 // the node goes back to unbuilt, so the next call tries again.
@@ -187,6 +225,19 @@ export function expandNode(tree, node, keys) {
   node.loading = true;
   const pending = (async () => {
     try {
+      if (node.deferred) {
+        const loaded = tree.load ? await tree.load({ name: node.name, version: node.version }) : null;
+        const edges = loaded?.children ?? [];
+        if (!edges.length) {
+          node.tag = loaded?.tag ?? null;
+          node.leaf = true;
+          node.children = [];
+          node.loading = false;
+          node.pending = null;
+          return;
+        }
+        node.childEdges = edges;
+      }
       const entries = group(await resolveAll(tree.resolve, node.childEdges)).sort(byName);
       node.children = entries.map((entry) => {
         const cycle = keys.includes(entry.key);
@@ -270,20 +321,28 @@ export const failedNote = (file, error) => `Couldn't read ${file ?? "the lockfil
 
 // The tree for a project (`deps` from its ecosystem's `parse`), with `note` and
 // `lockFile` set. `lock` is { file, text, resolver } or null when no lockfile was
-// found. If the lockfile or the walk fails, the tree keeps only the directs and says
-// why in `note`; this function never sets an error state. If `stale()` is true once
+// found; a lockfile entry that declares a `cache` (cache.js) gets `cache`, the reader
+// confined to it, as the resolver's third argument (null when no cache was found). The
+// resolver may be async, and its `note` becomes the tree's. If the lockfile or the walk
+// fails, the tree keeps only the directs and says why in `note`; this function never
+// sets an error state. Every tree it returns has `lazy` (its resolver loads children on
+// expand) and `cacheBacked` (its lockfile declares a cache, so a forced refresh rebuilds
+// it rather than keeping it while the lockfile is unchanged). If `stale()` is true once
 // the walk ends, it returns null before expandPaths runs, so `expanded` is untouched.
 // A refresh that starts during expandPaths isn't caught: expandPaths still deletes
 // the saved paths that fail or no longer match from `expanded`.
-export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_NOTE, expanded = new Set(), pause, stale = () => false } = {}) {
+export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_NOTE, expanded = new Set(), pause, stale = () => false, cache = null } = {}) {
   let resolver = () => null, made = null, note = lock ? null : noLockNote;
   if (lock && lock.text.length > MAX_LOCK_CHARS) {
     note = `${lock.file} is too large to parse, so only direct dependencies are shown.`;
   } else if (lock) {
     try {
-      made = lock.resolver(lock.text, project);
+      made = await lock.resolver(lock.text, project, cache);
       if (made?.error) note = failedNote(lock.file, made.error);
-      else if (made) resolver = made;
+      else if (made) {
+        resolver = made;
+        if (typeof made.note === "string" && made.note) note = made.note;
+      }
       else note = failedNote(lock.file, "its resolver returned nothing");
     } catch (error) { note = failedNote(lock.file, error); }
   }
@@ -299,6 +358,8 @@ export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_N
   if (stale()) return null;
   tree.note = note;
   tree.lockFile = lock?.file ?? null;
+  tree.lazy = typeof tree.load === "function";
+  tree.cacheBacked = Boolean(lock?.cache);
   try { await expandPaths(tree, expanded); } catch (error) { tree.note ??= failedNote(tree.lockFile, error); }
   return tree;
 }

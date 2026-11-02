@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { findManifest, lastValidProject, staleNote } from "../mods/greenflagged/audit.js";
-import { GO_INDIRECT_GROUP, GO_LOCKFILES, GO_NOTE, goResolver, parseGoMod, readGoMod } from "../mods/greenflagged/go.js";
+import { openCache, sessionReader } from "../mods/greenflagged/cache.js";
+import {
+  GO_INDIRECT_GROUP, GO_LOCKFILES, GO_MODULE_CACHE, GO_NO_CACHE_NOTE, GO_NOTE, escapeModulePath, escapeVersion, goModCacheFile, goResolver, parseGoMod,
+  readGoMod, scanGoMod, selectedVersions,
+} from "../mods/greenflagged/go.js";
 import { countsLine, directRoots, expandNode, groupKey, pathOf, treeForProject, visibleRows } from "../mods/greenflagged/tree.js";
 
 // go.mod is hand-written for the grammar. The other three are verbatim copies of real,
@@ -352,4 +356,305 @@ test("headless edit: valid → malformed keeps the last valid tree with a stale 
   const again = await at(fixed);
   assert.equal(again.error, undefined);
   assert.deepEqual(directRoots(await goTree(fixed)).map((n) => n.name), ["a", "c"]);
+});
+
+// --- the module cache (#13) ----------------------------------------------------------
+
+// A fake module cache at DIR. `files` maps a path relative to DIR to text, null or an
+// Error to reject with; every read is recorded as its absolute path. `memo` may be
+// shared between builds, as main.js shares one per machine and folder.
+const DIR = "/gm";
+const at = (name, version) => `${DIR}/${goModCacheFile(name, version)}`;
+function goCache(files = {}, memo = null) {
+  const seen = [];
+  const read = async (path) => {
+    seen.push(path);
+    const value = files[path];
+    if (value instanceof Error) throw value;
+    return value ?? null;
+  };
+  const shared = memo ?? sessionReader(read);
+  return { seen, files, memo: shared, cache: openCache(GO_MODULE_CACHE, DIR, read, shared) };
+}
+const LOCK = `${DIR}/cache/lock`;
+const cacheTree = (text, cache, options = {}) =>
+  treeForProject(parseGoMod(text), { ...GO_LOCKFILES[0], text }, { ...options, cache });
+const open = async (tree, ...names) => {
+  let nodes = tree.roots, keys = [], node = null;
+  for (const name of names) {
+    node = nodes.find((n) => n.name === name);
+    assert.ok(node, `no row ${name}`);
+    keys = [...keys, node.key];
+    await expandNode(tree, node, keys);
+    nodes = node.children;
+  }
+  return node;
+};
+const row = (n) => [n.name, n.version, n.constraint, n.marker];
+
+const APP = `module example.com/app
+
+go 1.22
+
+require (
+	github.com/fsnotify/fsnotify v1.9.0
+	go.opentelemetry.io/otel/sdk v1.44.0
+	github.com/BurntSushi/toml v1.4.0
+	golang.org/x/sys v0.30.0 // indirect
+)
+
+replace github.com/google/uuid => github.com/fork/uuid v1.7.0
+
+replace github.com/go-logr/logr => ./logr
+`;
+const warm = () => ({
+  [LOCK]: "",
+  [at("github.com/fsnotify/fsnotify", "v1.9.0")]: read("fsnotify-v1.9.0.mod"),
+  [at("go.opentelemetry.io/otel/sdk", "v1.44.0")]: read("otel-sdk-v1.44.0.mod"),
+  [at("golang.org/x/sys", "v0.30.0")]: "module golang.org/x/sys\n\ngo 1.18\n",
+});
+
+// --- escaping and the allowlist
+
+test("module paths and versions are escaped as Go stores them", () => {
+  assert.equal(escapeModulePath("github.com/BurntSushi/toml"), "github.com/!burnt!sushi/toml");
+  assert.equal(escapeModulePath("github.com/fsnotify/fsnotify"), "github.com/fsnotify/fsnotify");
+  assert.equal(escapeVersion("v1.0.0-RC1"), "v1.0.0-!r!c1");
+  assert.equal(escapeVersion("v2.0.0+incompatible"), "v2.0.0+incompatible");
+  for (const bad of ["github.com/a!b", "github.com/é", "v1!", "v1.0.0-ü", null, undefined, 7]) {
+    assert.equal(escapeModulePath(bad), null, String(bad));
+  }
+  assert.equal(goModCacheFile("github.com/BurntSushi/toml", "v1.4.0"), "cache/download/github.com/!burnt!sushi/toml/@v/v1.4.0.mod");
+  assert.equal(goModCacheFile("example.com/x", "v1.0.0-RC1"), "cache/download/example.com/x/@v/v1.0.0-!r!c1.mod");
+  assert.equal(goModCacheFile("example.com/x", "v2.0.0+incompatible"), "cache/download/example.com/x/@v/v2.0.0+incompatible.mod");
+});
+
+test("the allowlist refuses climbing, absolute and odd paths and versions", () => {
+  const paths = ["../../etc/passwd", "github.com/a/../../../x", "/etc/passwd", "a//b", "a/./b", "a/", "a\\b", "a b", "a%2e", "a\u0000b", "", "..", "a/.."];
+  for (const path of paths) assert.equal(goModCacheFile(path, "v1.0.0"), null, JSON.stringify(path));
+  const versions = ["../x", "..", ".", "v1/../../x", "v1 x", "v1/x", "", null, "v1\u0000"];
+  for (const version of versions) assert.equal(goModCacheFile("example.com/x", version), null, JSON.stringify(version));
+});
+
+test("a crafted go.mod and a crafted .mod never make the panel read outside the cache's .mod files", async () => {
+  const crafted = [
+    "../../etc/passwd v1.0.0", "/etc/passwd v1.0.0", "github.com/a/../../../x v1.0.0", "a/./b v1.0.0", "ok.com/x ../../../../etc/passwd",
+    "ok.com/y v1/../../x", "ok.com/z ..", "a%2e%2e v1.0.0", "Ünïcode.com/x v1.0.0", "a!b.com/x v1.0.0",
+  ];
+  const text = `module m\nrequire (\n${crafted.map((l) => `\t${l}`).join("\n")}\n\tgood.com/dep v1.0.0\n)\n`;
+  const { seen, cache } = goCache({
+    [LOCK]: "",
+    [at("good.com/dep", "v1.0.0")]: `module good.com/dep\nrequire (\n${crafted.map((l) => `\t${l}`).join("\n")}\n)\n`,
+  });
+  const tree = await cacheTree(text, cache);
+  const expandAll = async (nodes, keys, depth) => {
+    for (const node of nodes) {
+      if (node.leaf || depth > 3) continue;
+      await expandNode(tree, node, [...keys, node.key]);
+      await expandAll(node.children, [...keys, node.key], depth + 1);
+    }
+  };
+  await expandAll(tree.roots, [], 0);
+  assert.ok(seen.length > 1);
+  for (const path of seen) {
+    assert.ok(path === LOCK || (path.startsWith(`${DIR}/cache/download/`) && path.endsWith(".mod") && !path.includes("/../")), path);
+  }
+  const tags = new Set(tree.roots.filter((n) => n.name !== "good.com/dep").map((n) => n.tag));
+  assert.deepEqual([...tags], ["unreadable"]);
+});
+
+// --- selected versions, replace, children
+
+test("scanGoMod and selectedVersions: a direct line beats an indirect one, else the first wins", () => {
+  const scanned = scanGoMod("module m\nrequire (\n\ta v1 // indirect\n\ta v2\n\tb v1\n\tb v3\n\tc v4 // indirect\n)\n");
+  assert.equal(scanned.name, "m");
+  assert.deepEqual([...selectedVersions(scanned.requires)], [["a", "v2"], ["b", "v1"], ["c", "v4"]]);
+  assert.match(scanGoMod("require (\n").error, /never closed/);
+});
+
+test("a child shows the version the project selects, with the version asked for as its constraint", async () => {
+  const { cache } = goCache(warm());
+  const tree = await cacheTree(APP, cache);
+  const fsnotify = await open(tree, "github.com/fsnotify/fsnotify");
+  assert.deepEqual(fsnotify.children.map(row), [["golang.org/x/sys", "v0.30.0", "v0.13.0", null]]);
+  assert.equal(fsnotify.children[0].dev, false);
+  assert.equal(fsnotify.children[0].leaf, false); // deferred: opening it reads its own .mod
+  const sys = await open(tree, "github.com/fsnotify/fsnotify", "golang.org/x/sys");
+  assert.deepEqual([sys.leaf, sys.tag], [true, null]); // a .mod with no requires
+});
+
+test("otel/sdk opens into its 16 requires: project replaces applied, its own replaces ignored, unlisted ones as asked", async () => {
+  const { cache } = goCache(warm());
+  const tree = await cacheTree(APP, cache);
+  const sdk = await open(tree, "go.opentelemetry.io/otel/sdk");
+  const rows = sdk.children.map(row);
+  assert.equal(rows.length, 15); // 16 requires, logr dropped by the project's local replace
+  assert.ok(!rows.some(([name]) => name === "github.com/go-logr/logr"));
+  assert.deepEqual(rows.find(([name]) => name === "github.com/fork/uuid"), ["github.com/fork/uuid", "v1.7.0", "v1.6.0", "replaces github.com/google/uuid"]);
+  // otel/sdk's own `replace go.opentelemetry.io/otel => ../` is ignored.
+  assert.deepEqual(rows.find(([name]) => name === "go.opentelemetry.io/otel"), ["go.opentelemetry.io/otel", "v1.44.0", "v1.44.0", null]);
+  assert.deepEqual(rows.find(([name]) => name === "golang.org/x/sys"), ["golang.org/x/sys", "v0.30.0", "v0.45.0", null]);
+  assert.deepEqual(rows.find(([name]) => name === "gopkg.in/yaml.v3"), ["gopkg.in/yaml.v3", "v3.0.1", "v3.0.1", null]);
+  assert.ok(sdk.children.every((n) => n.dev === false));
+});
+
+test("a child naming the project's own module is dropped, and duplicates are one row", async () => {
+  const text = "module example.com/app\nrequire a.com/x v1.0.0\n";
+  const { cache } = goCache({
+    [LOCK]: "",
+    [at("a.com/x", "v1.0.0")]: "module a.com/x\nrequire (\n\texample.com/app v0.1.0\n\tb.com/y v1.0.0\n\tb.com/y v1.0.0 // indirect\n)\n",
+  });
+  const x = await open(await cacheTree(text, cache), "a.com/x");
+  assert.deepEqual(x.children.map(row), [["b.com/y", "v1.0.0", "v1.0.0", null]]);
+});
+
+test("a cycle between modules shows (cycle)", async () => {
+  const text = "module m\nrequire a.com/a v1.0.0\n";
+  const { cache } = goCache({
+    [LOCK]: "",
+    [at("a.com/a", "v1.0.0")]: "module a.com/a\nrequire b.com/b v1.0.0\n",
+    [at("b.com/b", "v1.0.0")]: "module b.com/b\nrequire a.com/a v1.0.0\n",
+  });
+  const tree = await cacheTree(text, cache);
+  const b = await open(tree, "a.com/a", "b.com/b");
+  assert.deepEqual(b.children.map((n) => [n.name, n.cycle, n.leaf]), [["a.com/a", true, true]]);
+});
+
+// --- missing, malformed, failing
+
+test("a module whose .mod isn't cached becomes, once opened, a leaf tagged not downloaded", async () => {
+  const { cache } = goCache(warm());
+  const tree = await cacheTree(APP, cache);
+  const toml = tree.roots.find((n) => n.name === "github.com/BurntSushi/toml");
+  assert.equal(toml.leaf, false);
+  await open(tree, "github.com/BurntSushi/toml");
+  assert.deepEqual([toml.leaf, toml.tag, toml.children], [true, "not downloaded", []]);
+});
+
+test("a malformed .mod gives a leaf tagged unreadable", async () => {
+  const { cache } = goCache({ ...warm(), [at("github.com/BurntSushi/toml", "v1.4.0")]: "require (\n\ta v1\n" });
+  const toml = await open(await cacheTree(APP, cache), "github.com/BurntSushi/toml");
+  assert.deepEqual([toml.leaf, toml.tag], [true, "unreadable"]);
+});
+
+test("a .mod read that fails leaves the row unbuilt, and a second open retries", async () => {
+  const file = at("github.com/BurntSushi/toml", "v1.4.0");
+  const { cache, files, seen } = goCache({ ...warm(), [file]: new Error("permission denied") });
+  const tree = await cacheTree(APP, cache);
+  const toml = tree.roots.find((n) => n.name === "github.com/BurntSushi/toml");
+  await assert.rejects(expandNode(tree, toml, [toml.key]), /permission denied/);
+  assert.deepEqual([toml.children, toml.leaf, toml.tag], [null, false, null]);
+  files[file] = "module github.com/BurntSushi/toml\nrequire a.com/x v1.0.0\n";
+  await expandNode(tree, toml, [toml.key]);
+  assert.deepEqual(toml.children.map((n) => n.name), ["a.com/x"]);
+  assert.equal(seen.filter((p) => p === file).length, 2);
+});
+
+// --- the flat fallback
+
+const flatRows = (tree) => visibleRows(tree, new Set()).map((r) => [r.node.name, r.node.version, r.node.marker, r.node.leaf]);
+
+test("with no cache the tree is goResolver's flat view with a note", async () => {
+  const text = read("go.mod");
+  const flat = await goTree(text);
+  const tree = await cacheTree(text, null);
+  assert.deepEqual(flatRows(tree), flatRows(flat));
+  assert.equal(countsLine(tree), countsLine(flat));
+  assert.equal(tree.note, GO_NO_CACHE_NOTE);
+  assert.equal(tree.lazy, false);
+  assert.equal(tree.cacheBacked, true);
+});
+
+test("with neither cache/lock nor the first module's .mod, the flat view, after reading only those two", async () => {
+  const text = read("go.mod");
+  const { cache, seen } = goCache({});
+  const tree = await cacheTree(text, cache);
+  assert.deepEqual(flatRows(tree), flatRows(await goTree(text)));
+  assert.equal(tree.note, GO_NO_CACHE_NOTE);
+  const first = readGoMod(text).direct[0];
+  assert.deepEqual(seen, [LOCK, at(first.name, first.version)]);
+});
+
+test("without cache/lock, the first module's .mod alone is enough", async () => {
+  const files = warm();
+  delete files[LOCK];
+  const { cache } = goCache(files);
+  const tree = await cacheTree(APP, cache);
+  assert.equal(tree.note, null);
+  assert.equal(tree.lazy, true);
+});
+
+test("a probe read that fails gives the flat view and says the cache couldn't be read", async () => {
+  const { cache } = goCache({ [LOCK]: new Error("host unreachable") });
+  const tree = await cacheTree(APP, cache);
+  assert.equal(tree.note, "Go's module cache couldn't be read: host unreachable");
+  assert.equal(tree.lazy, false);
+  assert.ok(tree.roots.every((n) => n.group || n.leaf));
+});
+
+test("an emptied cache isn't hidden by the session memo", async () => {
+  const files = warm();
+  const first = at("github.com/fsnotify/fsnotify", "v1.9.0");
+  const { cache, memo } = goCache(files);
+  await open(await cacheTree(APP, cache), "github.com/fsnotify/fsnotify"); // fsnotify's .mod is now in the memo
+  const emptied = goCache({}, memo);
+  const tree = await cacheTree(APP, emptied.cache);
+  assert.equal(tree.note, GO_NO_CACHE_NOTE);
+  assert.deepEqual(emptied.seen, [LOCK, first]);
+});
+
+test("a fallback heals once the cache appears, on a rebuild with the same memo", async () => {
+  const files = {};
+  const { cache, memo } = goCache(files);
+  const before = await cacheTree(APP, cache);
+  assert.equal(before.note, GO_NO_CACHE_NOTE);
+  assert.equal(before.cacheBacked, true);
+  Object.assign(files, warm());
+  const after = await cacheTree(APP, goCache(files, memo).cache);
+  assert.equal(after.note, null);
+  assert.equal(after.lazy, true);
+  assert.equal(after.cacheBacked, true);
+});
+
+// --- laziness, counts
+
+test("a first build reads only the probe; each open reads one .mod; a rebuild reopens from the memo", async () => {
+  const { cache, seen, memo, files } = goCache(warm());
+  const tree = await cacheTree(APP, cache);
+  assert.deepEqual(seen, [LOCK]);
+  const fsnotify = at("github.com/fsnotify/fsnotify", "v1.9.0");
+  await open(tree, "github.com/fsnotify/fsnotify");
+  assert.deepEqual(seen, [LOCK, fsnotify]);
+  const again = goCache(files, memo);
+  const expanded = new Set([pathOf(["github.com/fsnotify/fsnotify@v1.9.0"])]);
+  const rebuilt = await cacheTree(APP, again.cache, { expanded });
+  assert.deepEqual(again.seen, [LOCK]); // fsnotify's .mod came from the memo
+  assert.deepEqual(visibleRows(rebuilt, expanded).map((r) => r.node.name).slice(0, 2), ["github.com/BurntSushi/toml", "github.com/fsnotify/fsnotify"]);
+  assert.equal(rebuilt.roots.find((n) => n.name === "github.com/fsnotify/fsnotify").children.length, 1);
+});
+
+test("the cache view counts exactly as the flat view: duplicates and shared replacements once", async () => {
+  const text = [
+    "module m", "require (", "\ta v1.0.0", "\ta v1.0.0 // indirect", "\tb v1.0.0", "\tc v1.0.0 // indirect", "\td v2.0.0 // indirect", "\te v1.0.0", ")",
+    "replace c => shared v9.0.0", "replace d => shared v9.0.0", "replace e => ./e",
+  ].join("\n");
+  const { cache } = goCache({ [LOCK]: "" });
+  const tree = await cacheTree(text, cache);
+  const flat = await goTree(text);
+  assert.equal(countsLine(tree), countsLine(flat));
+  assert.equal(countsLine(tree), "2 direct, 3 total");
+  assert.ok(tree.roots.every((n) => n.dev === false));
+});
+
+test("the hand-written go.mod: same rows and counts as the flat view, every module expandable", async () => {
+  const text = read("go.mod");
+  const { cache } = goCache({ [LOCK]: "" });
+  const tree = await cacheTree(text, cache);
+  const flat = await goTree(text);
+  assert.equal(countsLine(tree), countsLine(flat));
+  assert.deepEqual(tree.roots.map((n) => [n.name, n.version, n.marker]), flat.roots.map((n) => [n.name, n.version, n.marker]));
+  assert.ok(tree.roots.every((n) => !n.leaf));
+  const group = tree.roots.at(-1);
+  await expandNode(tree, group, [group.key]);
+  assert.ok(group.children.every((n) => !n.leaf && n.dev === false));
 });

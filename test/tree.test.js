@@ -555,3 +555,142 @@ each("a package named like the group is its own row, even unversioned", async (w
   ]);
   assert.equal(countsLine(tree), "1 direct, 3 total");
 });
+
+// --- deferred children (`load`) --------------------------------------------------
+
+// A lazy resolver: every package is deferred, and `load` answers from `graph`
+// ({ name: { children, tag? } }), recording each call. `fail` names packages whose
+// load rejects until it is cleared.
+function lazy(graph, { fail = new Set(), extra = {} } = {}) {
+  const loads = [];
+  const resolver = {
+    resolve: (edge) => ({ version: edge.version ?? null, deferred: true }),
+    load: async (edge) => {
+      loads.push(`${edge.name}@${edge.version}`);
+      if (fail.has(edge.name)) throw new Error(`can't read ${edge.name}`);
+      return graph[edge.name] ?? { children: [] };
+    },
+    count: false,
+    ...extra,
+  };
+  return { resolver, loads };
+}
+const v1 = (name) => ({ name, version: "v1" });
+
+test("a deferred node is expandable, and load isn't called until it is expanded", async () => {
+  const { resolver, loads } = lazy({ a: { children: [v1("b")] } });
+  const tree = await buildTree([dep("a", false, { version: "v1" })], resolver);
+  const a = tree.roots[0];
+  assert.equal(a.leaf, false);
+  assert.deepEqual(a.childEdges, []);
+  assert.deepEqual(loads, []);
+  assert.deepEqual(visibleRows(tree, new Set()).map((r) => r.expandable), [true]);
+  await expandNode(tree, a, [a.key]);
+  assert.deepEqual(loads, ["a@v1"]);
+  assert.deepEqual(a.children.map((n) => [n.name, n.version, n.leaf, n.dev]), [["b", "v1", false, false]]);
+});
+
+test("a load with no children makes the node a leaf carrying its tag", async () => {
+  const { resolver } = lazy({ a: { children: [], tag: "not downloaded" }, b: { children: [] } });
+  const tree = await buildTree([dep("a", false, { version: "v1" }), dep("b", false, { version: "v1" })], resolver);
+  const [a, b] = tree.roots;
+  await expandNode(tree, a, [a.key]);
+  await expandNode(tree, b, [b.key]);
+  assert.deepEqual([a.leaf, a.tag, a.children], [true, "not downloaded", []]);
+  assert.deepEqual([b.leaf, b.tag], [true, null]);
+  assert.deepEqual(visibleRows(tree, new Set([pathOf([a.key])])).map((r) => r.expandable), [false, false]);
+});
+
+test("a load rejection puts the node back to unbuilt, and a retry loads again", async () => {
+  const fail = new Set(["a"]);
+  const { resolver, loads } = lazy({ a: { children: [v1("b")] } }, { fail });
+  const tree = await buildTree([dep("a", false, { version: "v1" })], resolver);
+  const a = tree.roots[0];
+  await assert.rejects(expandNode(tree, a, [a.key]), /can't read a/);
+  assert.deepEqual([a.children, a.loading, a.pending, a.leaf], [null, false, null, false]);
+  fail.clear();
+  await expandNode(tree, a, [a.key]);
+  assert.deepEqual(a.children.map((n) => n.name), ["b"]);
+  assert.deepEqual(loads, ["a@v1", "a@v1"]);
+});
+
+test("load is memoized per name@version across two parents", async () => {
+  const { resolver, loads } = lazy({ a: { children: [v1("c")] }, b: { children: [v1("c")] }, c: { children: [v1("d")] } });
+  const tree = await buildTree([dep("a", false, { version: "v1" }), dep("b", false, { version: "v1" })], resolver);
+  const [a, b] = tree.roots;
+  await expandNode(tree, a, [a.key]);
+  await expandNode(tree, b, [b.key]);
+  await expandNode(tree, a.children[0], [a.key, "c@v1"]);
+  await expandNode(tree, b.children[0], [b.key, "c@v1"]);
+  assert.deepEqual(loads, ["a@v1", "b@v1", "c@v1"]);
+  assert.deepEqual(b.children[0].children.map((n) => n.name), ["d"]);
+});
+
+test("a deferred cycle draws as a leaf with (cycle)", async () => {
+  const { resolver, loads } = lazy({ a: { children: [v1("b")] }, b: { children: [v1("a")] } });
+  const tree = await buildTree([dep("a", false, { version: "v1" })], resolver);
+  const a = tree.roots[0];
+  await expandNode(tree, a, [a.key]);
+  const b = a.children[0];
+  await expandNode(tree, b, [a.key, b.key]);
+  assert.deepEqual(b.children.map((n) => [n.name, n.cycle, n.leaf]), [["a", true, true]]);
+  assert.deepEqual(loads, ["a@v1", "b@v1"]);
+});
+
+test("resolver.total is the M of a resolver that doesn't count", async () => {
+  const { resolver } = lazy({}, { extra: { total: 7 } });
+  const tree = await buildTree([dep("a", false, { version: "v1" })], resolver);
+  assert.equal(countsLine(tree), "1 direct, 7 total");
+  const { resolver: none } = lazy({});
+  assert.equal(countsLine(await buildTree([dep("a")], none)), "1 direct");
+});
+
+test("treeForProject takes an async resolver; its note lands on the tree, and lazy follows load", async () => {
+  const { resolver } = lazy({ a: { children: [v1("b")] } }, { extra: { direct: [dep("a", false, { version: "v1" })], note: "a note" } });
+  let given;
+  const lock = { file: "x.lock", text: "", resolver: async (_text, _project, cache) => { given = cache; return resolver; } };
+  const tree = await treeForProject(project([dep("a")]), lock, { cache: "the cache" });
+  assert.equal(given, "the cache");
+  assert.equal(tree.note, "a note");
+  assert.equal(tree.lazy, true);
+  assert.equal(tree.cacheBacked, false);
+  const plain = await treeForProject(project([dep("a")]), { file: "x.lock", text: "", resolver: () => over({}) });
+  assert.equal(plain.lazy, false);
+  assert.equal(plain.note, null);
+});
+
+test("cacheBacked follows the lockfile's cache declaration on every tree, failures included", async () => {
+  const declared = (resolver) => ({ file: "x.lock", text: "", resolver, cache: { locate: [] } });
+  const ok = await treeForProject(project([dep("a")]), declared(async () => ({ resolve: () => null, note: "flat" })), { cache: null });
+  assert.equal(ok.cacheBacked, true);
+  assert.equal(ok.lazy, false);
+  const rejected = await treeForProject(project([dep("a")]), declared(async () => { throw new Error("boom"); }));
+  assert.equal(rejected.cacheBacked, true);
+  assert.match(rejected.note, /boom/);
+  const errored = await treeForProject(project([dep("a")]), declared(() => ({ error: "bad" })));
+  assert.equal(errored.cacheBacked, true);
+  const big = await treeForProject(project([dep("a")]), { ...declared(() => null), text: "x".repeat(MAX_LOCK_CHARS + 1) });
+  assert.equal(big.cacheBacked, true);
+  assert.equal((await treeForProject(project([dep("a")]), null)).cacheBacked, false);
+});
+
+test("expandPaths reopens a deferred path after a rebuild", async () => {
+  const { resolver, loads } = lazy({ a: { children: [v1("b")] }, b: { children: [v1("c")] } });
+  const lock = { file: "x.lock", text: "", resolver: () => ({ ...resolver, direct: [dep("a", false, { version: "v1" })] }) };
+  const expanded = new Set([pathOf(["a@v1"]), pathOf(["a@v1", "b@v1"])]);
+  const tree = await treeForProject(project([dep("a")]), lock, { expanded });
+  assert.deepEqual(visibleRows(tree, expanded).map((r) => r.node.name), ["a", "b", "c"]);
+  assert.deepEqual(loads, ["a@v1", "b@v1"]);
+  assert.equal(expanded.size, 2);
+});
+
+test("a plain resolver's tree has no deferred node, no tag and no load", async () => {
+  const graph = { a: { version: "1", children: [{ name: "b" }] }, b: { version: "2", children: [] } };
+  const tree = await buildTree([dep("a")], over(graph));
+  assert.equal(tree.load, null);
+  assert.equal(countsLine(tree), "1 direct, 2 total");
+  const a = tree.roots[0];
+  assert.deepEqual([a.deferred, a.tag, a.leaf], [false, null, false]);
+  await expandNode(tree, a, [a.key]);
+  assert.deepEqual(a.children.map((n) => [n.name, n.version, n.leaf, n.deferred, n.tag]), [["b", "2", true, false, null]]);
+});

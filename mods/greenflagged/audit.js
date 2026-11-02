@@ -55,13 +55,16 @@ const LABELS = {
 //                   the companions below; parsers that need none ignore them. A result
 //                   must never carry `root`, `folder`, `path` or `ecosystem`: it is spread
 //                   into the project and would overwrite them.
-//   lockfiles    -> [{ file, resolver(text, project) -> { resolve, count?, direct? } | { error } }], tried
-//                   in order in the manifest's folder; `resolve` is the contract in tree.js, and
-//                   `direct` replaces the manifest's directs when the lock records the project
-//                   (and may add a `group: true` heading row, as Go's "indirect" row does).
-//                   A manifest may be its own lockfile (Go lists go.mod), and is then read
-//                   twice. A resolver gets only the lock's text and the project: no file
-//                   reader and no machine, so it can't read further files today.
+//   lockfiles    -> [{ file, resolver(text, project, cache) -> { resolve, count?, direct?, load?, total?, note? }
+//                   | { error }, cache? }], tried in order in the manifest's folder; the resolver
+//                   may be async. `resolve`, `load`, `total` and `note` are the contract in
+//                   tree.js, and `direct` replaces the manifest's directs when the lock records
+//                   the project (and may add a `group: true` heading row, as Go's "indirect"
+//                   row does). A manifest may be its own lockfile (Go lists go.mod), and is
+//                   then read twice. An entry may declare `cache: { locate, probe, under,
+//                   suffix }` (cache.js), a language's local package cache; its resolver then
+//                   gets a reader confined to that declaration as `cache` (null when no cache
+//                   folder is found). A resolver gets no other reader and no machine.
 //   companions   -> { root: [names], files: [relative paths] }, files the parser needs from
 //                   the build's root folder. From the manifest's folder upward, findManifest
 //                   reads the `root` names in each folder; the first folder holding any of
@@ -81,8 +84,11 @@ const LABELS = {
 //                   row into a `group: true` heading whose `members` are `parse`'s edges.
 //                   A module with no build file, or one `parse` refuses, stays a plain row.
 // Parsers never get a file reader: every file the panel can read is a static name on an
-// entry (`file`, `lockfiles`, `companions`, `modules.files`), so the README's list of
-// files read is complete by construction. The one folder a manifest chooses is a
+// entry (`file`, `lockfiles`, `companions`, `modules.files`), or a file a `cache`
+// declaration allows, so the README's list of files read is complete by construction.
+// The one reader a resolver gets is confined by cache.js to its entry's declared probe
+// and the `suffix` files under `under`, and the README names each declaration
+// (test-enforced). The one folder a manifest chooses is a
 // module's, and gradleModuleFolder (gradle.js) keeps it under the build root: plain
 // folder names only, never `..`, at most MAX_GRADLE_MODULES of them.
 // Both Python entries share one base, so their lockfiles and note can't drift apart, and

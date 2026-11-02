@@ -6,7 +6,8 @@ The problems come first, and the greenflagged packages fold away behind a count.
 
 npm only for now. In a Python project the panel shows a plain tree of its dependencies, read from
 `uv.lock` or `poetry.lock`, with no verdicts, and sends nothing. A Go project gets the same plain
-tree, read from `go.mod` alone: its direct modules, then its indirect ones in a group. A Java or
+tree from `go.mod`: its direct modules, then its indirect ones in a group, each opening into the
+modules it needs, read from Go's module cache on your machine. A Java or
 Kotlin project gets its direct dependencies from `pom.xml` or the Gradle build file, without running
 Maven or Gradle, plus the versions in `gradle.lockfile` when there is one. In a Rust project it says
 Greenflagged doesn't check that language yet. Python verdicts follow once Greenflagged's PyPI audit
@@ -88,11 +89,15 @@ Herdr first, then on that one, so you only need to sign in on one of them.
   stopping before your home folder (home is checked only when the build file itself is there), and
   reads `gradle/libs.versions.toml`, `build.gradle.kts` and `build.gradle` from the first folder that
   has one. At that root it also reads `build.gradle.kts` or `build.gradle` from each module folder
-  the settings file includes (up to 100), only plain folder names under the root, never `..`. It
-  reads `~/.npmrc`. It writes nothing to your project. Requests are remembered in Herdr's
+  the settings file includes (up to 100), only plain folder names under the root, never `..`. For a
+  Go project it reads from Go's module cache (`GOMODCACHE`, else the first `GOPATH` folder plus
+  `/pkg/mod`, else `~/go/pkg/mod`) on the machine that holds the project: its `cache/lock`, to tell
+  whether there is a cache, and one `.mod` file under `cache/download/` each time you open a module's
+  row, nothing else there. It reads `~/.npmrc`. It writes nothing to your project. Requests are remembered in Herdr's
   `shared.json`.
 - **Programs:** it runs `printenv` to read your token, `xdg-open` or `open` when you click a row, and
-  `npm login` when you click Sign in.
+  `npm login` when you click Sign in. For a Go project `printenv` also reads `GOMODCACHE`, `GOPATH`
+  and `HOME` on the machine that holds the project, to find the module cache.
 
 ## When it checks
 
@@ -119,8 +124,9 @@ npm test
 ```
 
 `audit.js` holds the logic and imports nothing from Herdr, so the tests run under plain Node. So do
-`tree.js` (the plain dependency tree), `python.js` (Python's manifests and lockfiles), `go.js`
-(Go's `go.mod`), `maven.js` (Maven's `pom.xml`), `gradle.js` (Gradle build files, settings, version
+`tree.js` (the plain dependency tree), `cache.js` (finding a language's package cache and reading
+only the files it declares), `python.js` (Python's manifests and lockfiles), `go.js` (Go's `go.mod`
+and module cache), `maven.js` (Maven's `pom.xml`), `gradle.js` (Gradle build files, settings, version
 catalogs and `gradle.lockfile`), `xml.js`, the XML reader, and `toml.js`, the TOML reader, whose
 tests use a vendored copy of the [toml-test](https://github.com/toml-lang/toml-test) suite in
 `test/fixtures/toml-test/`.

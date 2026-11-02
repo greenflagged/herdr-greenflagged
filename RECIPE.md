@@ -45,8 +45,10 @@ Levels and labels come from the audit `status`:
   audit yet. The nearest folder with any of them wins, and within one folder `package.json` wins.
   When the winner can't be audited, it sends no request. A Python project shows a plain tree of its
   dependencies, read from `uv.lock` or `poetry.lock` beside the manifest when there is one. A Go project
-  shows a plain tree read from `go.mod` alone (direct modules, an "indirect" group, `replace` applied;
-  `go.js`'s header lists the edge cases). It also looks for `pom.xml`, then `build.gradle.kts`, then
+  shows a plain tree read from `go.mod` (direct modules, an "indirect" group, `replace` applied), and
+  each module row opens into the modules its own go.mod requires, read from Go's module cache
+  (`cache/lock`, and `.mod` files under `cache/download/`) only when the row opens; `go.js`'s header
+  lists the edge cases. It also looks for `pom.xml`, then `build.gradle.kts`, then
   `build.gradle` (Java/Kotlin, after `go.mod`). A Maven project shows its POM's direct dependencies
   (`maven.js`'s header lists the edge cases) and a sentence saying the full tree needs
   `mvn dependency:tree`, which the panel doesn't run. A Gradle project shows the dependencies its build
@@ -121,8 +123,16 @@ Levels and labels come from the audit `status`:
   At #7's estimated ~1000× for Herdr that is ~0.1 s and ~1.3 s. Its header lists the Python edge
   cases.
 - `go.js`: pure logic, Go's half of the tree: `go.mod` read line by line into direct and indirect
-  modules with `replace` applied. It runs nothing (no `go mod graph`) and reads no module cache, so
-  modules are leaves. `go.mod` is also its lockfile. A malformed `go.mod` is refused with an error
+  modules with `replace` applied. It runs nothing (no `go mod graph`). Its lockfile entry declares Go's
+  module cache, and each module row opens, when clicked, into the requires of its cached `.mod` file,
+  at the versions the project's `go.mod` selects. Paths are escaped as Go does and checked against an
+  allowlist before any file path is built. A module whose `.mod` isn't cached is a leaf tagged
+  `not downloaded`; with no cache at all the tree is flat with a yellow note. `go.mod` is also its
+  lockfile.
+- `cache.js`: pure logic, ecosystem-neutral: finds a lockfile entry's declared cache folder from
+  environment variables or the home folder, and reads through a reader confined to the declared probe
+  file and the `suffix` files under its `under` folder, with a per-session memo of what it read. Its
+  header lists the declaration contract and the two gates. A malformed `go.mod` is refused with an error
   naming the line ("go.mod line 7: …"), never read in part. "Malformed" is a check on the file's
   shape only, and it can be wrong both ways: a `go.mod` that passes may be one Go rejects (`exclude
   a`), and one Go accepts may be refused (`tool v1.0.0` inside a `require` block). Its header lists
@@ -140,7 +150,8 @@ Levels and labels come from the audit `status`:
   "resolved" group like Go's "indirect". It runs no `gradle` and reads no `~/.gradle`. Its header lists
   the forms it matches and the Gradle edge cases, and records its Node timing.
 - `main.js`: the `View`. From `herdr`: `spaces`, `panes`, `focused`, `exec`, `home`, `readTextFile`,
-  `watchFolder`, `theme`. It runs `printenv`, `xdg-open` then `open` for links, and
+  `watchFolder`, `theme`. It runs `printenv` (the token, and `GOMODCACHE`, `GOPATH` and `HOME` on the
+  project's machine to find Go's module cache), `xdg-open` then `open` for links, and
   `npm login` through `run("tab.new", { name, argv, folder })`.
 - The audit is one JSON-RPC `tools/call` of `audit_manifest` by `POST https://greenflagged.dev/mcp` with
   `Authorization: Bearer <token>`. The endpoint is stateless, so there is no `initialize`. The answer
@@ -223,7 +234,10 @@ Levels and labels come from the audit `status`:
 - A Go repo shows "Not checked: Go" in the header and sends no request. Its tree lists the direct modules
   from `go.mod` with versions, then a dim `▸ indirect` row that opens to the `// indirect` modules, with
   no yellow note: `github.com/brizzai/fleet` (11 direct, 28 indirect) reads "11 direct, 39 total", and
-  the rail shows `11`.
+  the rail shows `11`. With a warm module cache every module row shows ▸ and opens into the modules its
+  own go.mod requires; a module that isn't downloaded turns into a leaf tagged `not downloaded`, and ↻
+  after `go mod download` reads it again. With `GOMODCACHE` pointing at a missing folder the tree is
+  flat, with the yellow "module cache wasn't found" note.
 - A Maven project shows "Not checked: Java/Kotlin" (or "Kotlin" with `kotlin-maven-plugin`), its direct
   dependencies with `dev`, `provided` and `runtime` tags, and the yellow Maven sentence. A Kotlin Gradle
   project shows "Not checked: Kotlin", its catalog dependencies resolved, the root project's name from

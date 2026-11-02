@@ -542,3 +542,23 @@ test("README and RECIPE name every file the panel reads", () => {
     assert.ok(recipe.includes(`\`${name}\``), `RECIPE.md lacks ${name}`);
   }
 });
+
+// A lockfile's `cache` declaration (cache.js) widens what the panel reads, so README must
+// name its probe and folder in the Files bullet, and every variable it reads (HOME for a
+// home step) in the Programs bullet.
+test("README names every declared cache's files and the variables that locate it", () => {
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const files = readme.slice(readme.indexOf("**Files:**"), readme.indexOf("**Programs:**"));
+  const programs = readme.slice(readme.indexOf("**Programs:**"), readme.indexOf("## When it checks"));
+  assert.ok(files.length > 0 && programs.length > 0);
+  const caches = ECOSYSTEMS.flatMap((e) => (e.lockfiles ?? []).map((l) => l.cache).filter(Boolean));
+  assert.ok(caches.length >= 1);
+  for (const cache of caches) {
+    for (const path of [cache.probe, cache.under]) assert.ok(files.includes(`\`${path}\``), `README's Files bullet lacks ${path}`);
+    for (const step of cache.locate) {
+      const name = step.env ?? (step.home ? "HOME" : null);
+      assert.ok(name, JSON.stringify(step));
+      assert.ok(programs.includes(`\`${name}\``), `README's Programs bullet lacks ${name}`);
+    }
+  }
+});
