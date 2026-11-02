@@ -16,8 +16,8 @@ Top to bottom, 320 px wide, on theme `surface`:
   fail to parse while you edit it. When that happens, the panel keeps the last valid list or tree of
   the same file on screen. The error appears above it in `ansi1`, with " · showing the last valid
   version" appended. If there was no earlier valid read, or you have moved to another project, the
-  error shows alone. This state is held in memory only. The panel watches the folder either way, so
-  saving the fixed file refreshes it.
+  error shows alone. This state is held in memory only. For a local project the panel watches the
+  folder either way, so saving the fixed file refreshes it.
 - **Rows**, scrolling. Each has a 7 px dot in its level's color, the package name, a `dev` tag for dev
   dependencies and a status label; below that, the constraint and `→ version`; below that, a reason if
   there is one.
