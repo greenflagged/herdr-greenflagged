@@ -103,6 +103,15 @@ export async function findManifest(cwd, home, read) {
   return null;
 }
 
+// A manifest being edited is often malformed for a moment. On a parse error the panel
+// keeps showing what it last showed for the same file, marked stale: this answers that
+// last valid project, or null when there is none (another file, or no valid read yet).
+// Held in memory by the panel only, so it ends with the project or the panel.
+export function lastValidProject(previous, failed) {
+  return previous && !previous.error && previous.path === failed?.path ? previous : null;
+}
+export const staleNote = (error) => `${error} · showing the last valid version`;
+
 // A parser should answer { error } on bad input; one that throws gets the same
 // { error } result, so findManifest still returns the project and its message names
 // the manifest file.

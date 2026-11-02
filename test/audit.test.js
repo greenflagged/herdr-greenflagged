@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  AUDIT_TTL_MS, ECOSYSTEMS, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc,
+  AUDIT_TTL_MS, ECOSYSTEMS, MAX_ENTRIES, WATCHED_FILES, SIGN_IN_COMMAND, auditRequest, findBlock, findManifest, cachedAudit, storeAudit, packageUrl, rememberRequest, requestCall, withRequests, parentFolders, parseToolResponse, parsePackageJson, rows, summarize, tokenFromNpmrc, lastValidProject, staleNote,
 } from "../mods/greenflagged/audit.js";
 
 const toolReply = (result, extra = {}) => JSON.stringify({
@@ -375,4 +375,20 @@ test("tokenFromNpmrc reads a literal or resolves a variable", () => {
   assert.equal(tokenFromNpmrc("registry=x\n//greenflagged.dev/npm/:_authToken=${GREENFLAGGED_TOKEN}\n", env), "gflag_env");
   assert.equal(tokenFromNpmrc("//registry.npmjs.org/:_authToken=npm_x\n"), null);
   assert.equal(tokenFromNpmrc(null), null);
+});
+
+test("lastValidProject keeps the last valid read of the same file only", async () => {
+  const good = await findManifest("/r", "/Users/a", files({ "/r/package.json": '{"dependencies":{"a":"1"}}' }));
+  const bad = await findManifest("/r", "/Users/a", files({ "/r/package.json": "{ nope" }));
+  const other = await findManifest("/s", "/Users/a", files({ "/s/package.json": "{ nope" }));
+  assert.ok(bad.error);
+  assert.equal(lastValidProject(good, bad), good);
+  assert.equal(lastValidProject(good, other), null); // another project: nothing carried over
+  assert.equal(lastValidProject(bad, bad), null); // no valid read yet: the error alone
+  assert.equal(lastValidProject(null, bad), null);
+  assert.equal(lastValidProject(undefined, bad), null);
+});
+
+test("staleNote puts the parse error first and says the view is the last valid one", () => {
+  assert.equal(staleNote("go.mod line 7: x"), "go.mod line 7: x · showing the last valid version");
 });

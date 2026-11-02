@@ -25,12 +25,17 @@
 //   `replaces <old path>` beside it; the version as required stays the row's constraint.
 //   Modules replaced by the same module@version share one row, and its marker lists
 //   every old path (`replaces a, b`), so "N direct" counts that row once.
-// - A replacement by a local path (`./x`, `../x`, `/abs`, or anything with no version)
-//   drops the module from the tree and counts it on the "not checked" line under its
-//   original path. A `replace` of a module go.mod doesn't require is ignored.
+// - A replacement by a local path (`./x`, `../x`, `/abs`, `C:\x`) drops the module from
+//   the tree and counts it on the "not checked" line under its original path. A `replace`
+//   of a module go.mod doesn't require is ignored.
 // - `exclude`, `retract`, `go`, `toolchain`, `godebug`, `tool`, `ignore` and unknown
-//   directives are ignored, single-line or in a `( … )` block. A block left open (no `)`)
-//   ends at the next line starting with a directive keyword or a block opener.
+//   directives are ignored, single-line or in a `( … )` block.
+// - A malformed go.mod is refused, not half-read: the result is { error } naming the
+//   line. Malformed means a block with no `)` by the end of the file; a directive keyword
+//   or a block opener inside a block; a `require` that isn't a path and a version; or a
+//   `replace` with no `=>`, or whose right side is neither a local path alone nor a path
+//   and a version. This is a check on the shape of the file only: a go.mod passing it may
+//   still be one Go rejects.
 // - The indirect row is a group (`group: true` on the direct, see tree.js), keyed so no
 //   module path can collide with it. A hand-written go.mod requiring a module literally
 //   named `indirect` shows two rows: the module, then the group.
@@ -58,17 +63,16 @@ function unquote(token) {
   return token;
 }
 
-// [path] or [path, version] on each side of `=>`, or null when the line isn't one.
+// [path] or [path, version] on the left of `=>`; on the right, a local path alone or a
+// module path and version. Anything else is null.
 function readReplace(args) {
   const arrow = args.indexOf("=>");
-  if (arrow < 1) return null;
+  if (arrow < 1 || args.indexOf("=>", arrow + 1) !== -1) return null;
   const left = args.slice(0, arrow), right = args.slice(arrow + 1);
   if (left.length > 2 || right.length < 1 || right.length > 2) return null;
-  return {
-    from: left[0], fromVersion: left[1] ?? null,
-    to: right[0], toVersion: right[1] ?? null,
-    local: right.length === 1 || LOCAL_PATH.test(right[0]),
-  };
+  const local = LOCAL_PATH.test(right[0]);
+  if (local !== (right.length === 1)) return null;
+  return { from: left[0], fromVersion: left[1] ?? null, to: right[0], toVersion: right[1] ?? null, local };
 }
 
 // go.mod's directive keywords (https://go.dev/ref/mod#go-mod-file-grammar).
@@ -81,39 +85,43 @@ function blockOpener(tokens) {
   return null;
 }
 
-// go.mod → { name, direct, indirect, skipped }. `direct` and `indirect` are
-// [{ name, version, constraint, dev: false, marker? }] after replaces; `skipped` holds
-// the original paths of modules replaced by a local path.
+// go.mod → { name, direct, indirect, skipped }, or { error } naming the first malformed
+// line. `direct` and `indirect` are [{ name, version, constraint, dev: false, marker? }]
+// after replaces; `skipped` holds the original paths of modules replaced by a local path.
 export function readGoMod(text) {
-  const empty = { name: null, direct: [], indirect: [], skipped: [] };
-  if (typeof text !== "string") return empty;
-  let name = null, block = null;
+  if (typeof text !== "string") return { name: null, direct: [], indirect: [], skipped: [] };
+  let name = null, block = null, opened = 0;
   const requires = [], replaces = [];
-  const act = (directive, args, indirect) => {
-    if (directive === "module" && args.length >= 1) name ??= args[0];
-    else if (directive === "require" && args.length >= 2) requires.push({ path: args[0], version: args[1], indirect });
-    else if (directive === "replace") {
-      const replace = readReplace(args);
-      if (replace) replaces.push(replace);
-    }
-  };
-  for (const raw of text.split(/\r?\n/)) {
-    const { tokens, indirect } = lineTokens(raw);
+  const lines = text.split(/\r?\n/);
+  const fail = (n, why) => ({ error: `go.mod line ${n}: ${why}` });
+  for (let i = 0; i < lines.length; i++) {
+    const n = i + 1, { tokens, indirect } = lineTokens(lines[i]);
     if (!tokens.length) continue;
-    // Inside a block, a line starting with a directive keyword, or any block opener,
-    // closes the block (Go rejects both there) and is then read as a top-level line. So
-    // a block missing its `)` can't swallow later directives or list a module named
-    // `require`. The trade: a block line whose path is exactly a keyword is not listed.
     const opens = blockOpener(tokens);
-    if (block !== null && tokens[0] !== ")" && opens === null && !DIRECTIVES.has(tokens[0])) {
-      act(block, tokens, indirect);
-      continue;
+    let directive, args;
+    if (block !== null) {
+      if (tokens[0] === ")") { block = null; continue; }
+      if (opens !== null) return fail(n, `\`${opens} (\` inside the \`${block} (\` block opened on line ${opened}`);
+      if (DIRECTIVES.has(tokens[0])) return fail(n, `\`${tokens[0]}\` inside the \`${block} (\` block opened on line ${opened}`);
+      directive = block; args = tokens;
+    } else {
+      if (opens !== null) { block = opens; opened = n; continue; }
+      directive = tokens[0]; args = tokens.slice(1);
     }
-    block = null;
-    if (tokens[0] === ")") continue;
-    if (opens !== null) { block = opens; continue; }
-    act(tokens[0], tokens.slice(1), indirect);
+    if ((directive === "require" || directive === "replace") && args.some((a) => a === "(" || a === ")")) {
+      return fail(n, `a stray \`(\` or \`)\` in a ${directive}`);
+    }
+    if (directive === "module" && args.length >= 1) name ??= args[0];
+    else if (directive === "require") {
+      if (args.length !== 2) return fail(n, "a require needs a module path and a version");
+      requires.push({ path: args[0], version: args[1], indirect });
+    } else if (directive === "replace") {
+      const replace = readReplace(args);
+      if (!replace) return fail(n, "a replace needs `path [version] => ./local/path` or `path [version] => path version`");
+      replaces.push(replace);
+    }
   }
+  if (block !== null) return fail(opened, `the \`${block} (\` block is never closed`);
 
   // A direct line beats an indirect one; within a kind, the first line wins.
   const directs = new Map(), indirects = new Map();
@@ -127,9 +135,8 @@ export function readGoMod(text) {
   const replaceFor = (path, version) =>
     replaces.find((r) => r.from === path && r.fromVersion === version) ?? replaces.find((r) => r.from === path && r.fromVersion === null);
   // Two required modules replaced by the same module@version share one row, its marker
-  // naming every path it replaces. That is a display choice: Go itself rejects a go.mod
-  // that replaces two modules with the same module@version. A direct row absorbs
-  // an indirect one, as a direct line beats an indirect one above.
+  // naming every path it replaces. A direct row absorbs an indirect one, as a direct
+  // line beats an indirect one above.
   const rows = new Map();
   const apply = (map) => {
     const out = [];
@@ -157,16 +164,21 @@ export function readGoMod(text) {
 
 // The `parse` contract (audit.js): the direct modules are the deps.
 export function parseGoMod(text) {
-  const { name, direct, skipped } = readGoMod(text);
+  const read = readGoMod(text);
+  if (read.error) return { error: read.error };
+  const { name, direct, skipped } = read;
   return { name, deps: direct, skipped };
 }
 
-// go.mod read again as the lockfile → { resolve, direct }. The directs are the direct
+// go.mod read again as the lockfile → { resolve, direct }, or { error } if it is
+// malformed (only when a save lands between the two reads). The directs are the direct
 // modules plus, when there are indirect ones, the group row; the group resolves to the
 // indirect modules and every module to null, which keeps the version its edge carries
 // and makes it a leaf (tree.js).
 export function goResolver(text, _project) {
-  const { direct, indirect } = readGoMod(text);
+  const read = readGoMod(text);
+  if (read.error) return { error: read.error };
+  const { direct, indirect } = read;
   const children = indirect.map(({ dev: _dev, ...edge }) => edge);
   const roots = indirect.length
     ? [...direct, { name: GO_INDIRECT_GROUP, version: null, constraint: null, dev: false, group: true }]

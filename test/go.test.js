@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { findManifest } from "../mods/greenflagged/audit.js";
+import { findManifest, lastValidProject, staleNote } from "../mods/greenflagged/audit.js";
 import { GO_INDIRECT_GROUP, GO_LOCKFILES, GO_NOTE, goResolver, parseGoMod, readGoMod } from "../mods/greenflagged/go.js";
 import { countsLine, directRoots, expandNode, groupKey, pathOf, treeForProject, visibleRows } from "../mods/greenflagged/tree.js";
 
@@ -53,16 +53,12 @@ test("a module required twice: direct beats indirect in any order, else the firs
   assert.deepEqual(pairs(readGoMod("require a v1.0.0 // indirect\nrequire a v1.1.0 // indirect\n").indirect), [["a", "v1.0.0"]]);
 });
 
-test("a require line with no version is skipped", () => {
-  assert.deepEqual(readGoMod("require a\nrequire (\n\tb\n\tc v1.0.0\n)\n").direct.map((m) => m.name), ["c"]);
-});
-
-test("readGoMod never throws and reads nothing from empty or non-text input", () => {
+test("readGoMod never throws, and reads nothing from empty or non-text input", () => {
   const empty = { name: null, direct: [], indirect: [], skipped: [] };
-  for (const input of ["", null, undefined, 42, {}, ["require a v1"], "(\n)\n)\n((", "require (\nrequire (\n", "=> => =>"]) {
+  for (const input of ["", null, undefined, 42, {}, ["require a v1"]]) assert.deepEqual(readGoMod(input), empty, String(input));
+  for (const input of ["(\n)\n)\n((", "require (\nrequire (\n", "=> => =>", "replace => =>\n", "require\n"]) {
     const result = readGoMod(input);
-    if (typeof input !== "string" || input === "") assert.deepEqual(result, empty, String(input));
-    assert.deepEqual(parseGoMod(input).deps, result.direct);
+    assert.ok(result.error === undefined || /^go\.mod line \d+: /.test(result.error), input);
   }
 });
 
@@ -90,7 +86,7 @@ test("a replace written before its require still applies", () => {
 });
 
 test("a local replace drops the module and lists its original path as skipped", () => {
-  for (const target of ["./local", "../local", "/abs/path", "../", "C:\\mods\\x", "nover"]) {
+  for (const target of ["./local", "../local", "/abs/path", "../", "C:\\mods\\x"]) {
     const result = readGoMod(`require (\n\ta v1.0.0\n\tb v1.0.0 // indirect\n\tkeep v1.0.0\n)\nreplace a => ${target}\nreplace b v1.0.0 => ${target}\n`);
     assert.deepEqual(pairs(result.direct), [["keep", "v1.0.0"]], target);
     assert.deepEqual(result.indirect, [], target);
@@ -126,35 +122,60 @@ test("a replace of a module that isn't required is ignored, not skipped", () => 
 
 // --- ignored directives ----------------------------------------------------------
 
-test("a block opener inside an open block starts the new block instead of listing `require`", () => {
-  const result = readGoMod("require (\n\ta v1.0.0\nrequire (\n\tb v1.0.0\n)\nreplace(\n\tb => c v2.0.0\n)\n");
-  assert.deepEqual(pairs(result.direct), [["a", "v1.0.0"], ["c", "v2.0.0"]]);
-  assert.deepEqual(pairs(readGoMod("require (\nrequire (\n").direct), []);
-  assert.deepEqual(pairs(readGoMod("exclude (\n\tx v1.0.0\nrequire (\n\ty v1.0.0\n)\n").direct), [["y", "v1.0.0"]]);
+// --- malformed go.mod -------------------------------------------------------------
+
+test("a malformed go.mod is refused with an error naming the line", () => {
+  const cases = [
+    // A block never closed: the error names the line that opened it.
+    ["module m\nrequire (\n\ta v1.0.0\n", 2, "the `require (` block is never closed"],
+    ["module m\nreplace(\n\ta => b v1.0.0\n", 2, "the `replace (` block is never closed"],
+    ["module m\nfrobnicate (\n\tx\n", 2, "the `frobnicate (` block is never closed"],
+    // A directive keyword inside a block, for every keyword.
+    ...["module example.com/m", "go 1.22", "toolchain go1.22.4", "godebug default=go1.21", "require c v1.0.0",
+      "replace a => b v2.0.0", "exclude a v0.9.0", "retract v1.0.1", "tool golang.org/x/tools/cmd/stringer",
+      "ignore ./node_modules"].map((line) => [`module m\nrequire (\n\ta v1.0.0\n${line}\n)\n`, 4,
+      `\`${line.split(" ")[0]}\` inside the \`require (\` block opened on line 2`]),
+    // A block opener inside a block, either spelling.
+    ["require (\n\ta v1.0.0\nrequire (\n\tb v1.0.0\n)\n", 3, "`require (` inside the `require (` block opened on line 1"],
+    ["exclude (\n\tx v1.0.0\nreplace(\n)\n", 3, "`replace (` inside the `exclude (` block opened on line 1"],
+    // A require that isn't a path and a version, single-line or in a block.
+    ["module m\nrequire a\n", 2, "a require needs a module path and a version"],
+    ["require (\n\tb v1.0.0\n\tc\n)\n", 3, "a require needs a module path and a version"],
+    ["require a v1.0.0 extra\n", 1, "a require needs a module path and a version"],
+    ["require\n", 1, "a require needs a module path and a version"],
+    ["require ()\n", 1, "a require needs a module path and a version"],
+    ["require a v1.0.0 )\n", 1, "a stray `(` or `)` in a require"],
+    ["require a v1.0.0\nreplace a => ( b\n", 2, "a stray `(` or `)` in a replace"],
+  ];
+  const badReplace = "a replace needs `path [version] => ./local/path` or `path [version] => path version`";
+  // A replace with no `=>`, or a right side that's neither a local path alone nor a path and a version.
+  for (const line of ["a b v1.0.0", "a =>", "=> b v1.0.0", "a v1 v2 => b v1.0.0", "a => b", "a => ./b v1.0.0", "a => b v1.0.0 extra", "a => b => c v1"]) {
+    cases.push([`require a v1.0.0\nreplace ${line}\n`, 2, badReplace]);
+    cases.push([`require a v1.0.0\n\nreplace (\n\t${line}\n)\n`, 4, badReplace]);
+  }
+  for (const [text, line, why] of cases) {
+    const error = `go.mod line ${line}: ${why}`;
+    assert.deepEqual(readGoMod(text), { error }, text);
+    assert.deepEqual(parseGoMod(text), { error }, text);
+    assert.deepEqual(goResolver(text, null), { error }, text);
+  }
 });
 
-test("a directive line closes a truncated block, for every directive keyword", () => {
-  const keywords = ["module", "go", "toolchain", "godebug", "require", "replace", "exclude", "retract", "tool", "ignore"];
-  const lines = {
-    module: "module example.com/m", go: "go 1.22", toolchain: "toolchain go1.22.4", godebug: "godebug default=go1.21",
-    require: "require c v1.0.0", replace: "replace a => b v2.0.0", exclude: "exclude a v0.9.0",
-    retract: "retract v1.0.1", tool: "tool golang.org/x/tools/cmd/stringer", ignore: "ignore ./node_modules",
-  };
-  for (const keyword of keywords) {
-    for (const directive of [lines[keyword], `${keyword} (`]) {
-      // The truncated block, then the directive, then a later single-line require and replace.
-      const text = `require (\n\ta v1.0.0\n${directive}\nrequire d v1.0.0\nreplace d => e v3.0.0\n`;
-      const result = readGoMod(text);
-      const names = [...result.direct, ...result.indirect].map((m) => m.name);
-      for (const k of keywords) assert.ok(!names.includes(k), `${directive}: lists module ${k}`);
-      assert.ok(names.includes("e"), `${directive}: later replace lost`);
-      assert.ok(names.includes("b") || names.includes("a"), `${directive}: block line lost`);
-    }
-  }
-  // The finding's case: the replace and require after the truncated block both apply.
-  const result = readGoMod("require (\n\ta v1.0.0\nreplace a => b v2.0.0\nrequire c v1.0.0\n");
-  assert.deepEqual(pairs(result.direct), [["b", "v2.0.0"], ["c", "v1.0.0"]]);
-  assert.equal(readGoMod("require (\n\ta v1.0.0\nmodule example.com/m\n").name, "example.com/m");
+test("lines are counted from 1 with CRLF too, blank and comment lines included", () => {
+  assert.deepEqual(readGoMod("// header\r\n\r\nmodule m\r\nrequire a\r\n"), { error: "go.mod line 4: a require needs a module path and a version" });
+});
+
+test("a malformed go.mod reaches the panel as the project's error, through findManifest", async () => {
+  const project = await findManifest("/r", "/Users/a", async (path) => (path === "/r/go.mod" ? "module r\nrequire (\n\ta v1.0.0\n" : null));
+  assert.equal(project.path, "/r/go.mod");
+  assert.equal(project.error, "go.mod line 2: the `require (` block is never closed");
+});
+
+test("a lock read that comes back malformed gives the tree a note, not a partial tree", async () => {
+  const good = "module m\nrequire a v1.0.0\n";
+  const tree = await treeForProject(parseGoMod(good), { file: "go.mod", text: "module m\nrequire (\n", resolver: goResolver });
+  assert.equal(tree.note, "Couldn't read go.mod: go.mod line 2: the `require (` block is never closed");
+  assert.deepEqual(directRoots(tree).map((n) => n.name), ["a"]);
 });
 
 test("exclude, retract, go, toolchain, godebug, tool, ignore and unknown directives are ignored, line or block", () => {
@@ -314,4 +335,21 @@ test("if go.mod can't be read a second time, the note replaces the no-lockfile s
   const tree = await treeForProject(project, null, { noLockNote: GO_NOTE });
   assert.equal(tree.note, GO_NOTE);
   assert.equal(countsLine(tree), "8 direct, 8 total");
+});
+
+test("headless edit: valid → malformed keeps the last valid tree with a stale error → valid again", async () => {
+  const at = (text) => findManifest("/r", "/Users/a", async (path) => (path === "/r/go.mod" ? text : null));
+  const valid = "module r\nrequire (\n\ta v1.0.0\n\tb v1.0.0 // indirect\n)\n";
+  const first = await at(valid);
+  const tree = await goTree(valid);
+  // Mid-edit, a block not yet closed: same file, so the last valid project and tree stay.
+  const editing = await at("module r\nrequire (\n\ta v1.0.0\n\tc v1.0.0\n");
+  assert.equal(lastValidProject(first, editing), first);
+  assert.equal(staleNote(editing.error), "go.mod line 2: the `require (` block is never closed · showing the last valid version");
+  assert.equal(countsLine(tree), "1 direct, 2 total");
+  // Saved again, valid: a fresh tree with the new module, no stale note.
+  const fixed = "module r\nrequire (\n\ta v1.0.0\n\tc v1.0.0\n)\n";
+  const again = await at(fixed);
+  assert.equal(again.error, undefined);
+  assert.deepEqual(directRoots(await goTree(fixed)).map((n) => n.name), ["a", "c"]);
 });

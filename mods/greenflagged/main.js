@@ -4,8 +4,8 @@ import {
   closeOverlay, exec, focused, home, layout, openOverlay, panes, props, readTextFile, run, setShared, shared, spaces, theme, watchFolder,
 } from "herdr";
 import {
-  MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditRequest, cachedAudit, findBlock, findManifest, packageUrl, parseToolResponse, rememberRequest, requestCall, rows,
-  storeAudit, summarize, tokenFromNpmrc, withRequests,
+  MCP_URL, MAX_ENTRIES, SIGN_IN_COMMAND, WATCHED_FILES, auditRequest, cachedAudit, findBlock, findManifest, lastValidProject, packageUrl, parseToolResponse, rememberRequest, requestCall, rows,
+  staleNote, storeAudit, summarize, tokenFromNpmrc, withRequests,
 } from "./audit.js";
 import { countsLine, directRoots, expandNode, failedNote, treeForProject, visibleRows } from "./tree.js";
 
@@ -155,7 +155,16 @@ export default class Greenflagged extends View {
         const project = await findManifest(here.cwd, home(), (path) => readTextFile(path, { on: here.on }).catch(() => null));
         if (run !== this.run) return;
         if (!project) { this.project = null; this.list = null; this.watched = null; return settle("none"); }
-        if (project.error) { this.project = project; this.list = null; return settle("error", project.error); }
+        if (project.error) {
+          // Mid-edit: keep the last valid list or tree of this file, with the error over it.
+          const last = lastValidProject(this.project, project);
+          if (last && (last.ecosystem.audited ? this.list : this.tree)) {
+            return settle(last.ecosystem.audited ? "error" : "unsupported", staleNote(project.error));
+          }
+          if (project.path !== this.project?.path) { this.tree = null; this.treeSource = null; this.expanded = new Set(); }
+          this.project = project; this.list = null;
+          return settle("error", project.error);
+        }
         this.watch(project, here.on, cx);
         const changedProject = project.path !== this.project?.path;
         if (changedProject) { this.tree = null; this.treeSource = null; this.expanded = new Set(); }
@@ -451,6 +460,8 @@ export default class Greenflagged extends View {
           div().text_size(12).text_color(t.muted).child(`Not checked: ${this.project.ecosystem.name}`)))
         .when(this.state === "unsupported" && Boolean(this.tree), (el) => el.child(
           div().text_size(12).text_color(t.dim).child(countsLine(this.tree))))
+        .when(this.state === "unsupported" && Boolean(this.message), (el) => el.child(
+          div().text_size(11).text_color(t.ansi1).child(this.message)))
         .when(this.state === "unsupported" && Boolean(this.tree?.note), (el) => el.child(
           div().text_size(11).text_color(t.ansi3).child(this.tree.note)))
         .when(Boolean(this.project?.ecosystem.audited) && this.project.deps?.length > MAX_ENTRIES, (el) => el.child(
