@@ -1,0 +1,21 @@
+# Production requirements
+--index-url https://pypi.org/simple
+
+-r other.txt
+-c constraints.txt
+-e .
+-e git+https://example.com/x.git#egg=foo
+
+Django>=4.2,<5 \
+    --hash=sha256:aaaa \
+    --hash=sha256:bbbb
+requests[Socks, security] >= 2.31  # HTTP
+typing_extensions; python_version < "3.10"
+Zope.Interface==6.1
+mypkg @ https://example.com/mypkg-1.0.tar.gz
+https://example.com/bare-1.0.tar.gz
+./local/pkg
+dist/thing-1.0-py3-none-any.whl
+foo==${VERSION}
+!!!
+django==4.0

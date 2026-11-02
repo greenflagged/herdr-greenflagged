@@ -4,8 +4,10 @@ A [Herdr](https://herdr.dev) panel that follows the terminal you're working in, 
 `package.json`, and shows each direct dependency's [Greenflagged](https://greenflagged.dev) status.
 The problems come first, and the greenflagged packages fold away behind a count.
 
-npm only for now. In a Python, Rust or Go project the panel says Greenflagged doesn't check that
-language yet, and sends nothing. Python follows once Greenflagged's PyPI audit is live.
+npm only for now. In a Python project the panel shows a plain tree of its dependencies, read from
+`uv.lock` or `poetry.lock`, with no verdicts, and sends nothing. In a Rust or Go project it says
+Greenflagged doesn't check that language yet. Python verdicts follow once Greenflagged's PyPI audit
+is live.
 
 ## What it looks like
 
@@ -76,7 +78,8 @@ Herdr first, then on that one, so you only need to sign in on one of them.
 - **Requests:** hovering a `not imported` package shows a Request button. Clicking it asks Greenflagged
   to import and review that package, under your token. Nothing is requested unless you click.
 - **Files:** it reads `package.json` from your terminal's folder and the folders above it, looks for
-  `pyproject.toml`, `requirements.txt`, `Cargo.toml` and `go.mod` there too, and reads
+  `pyproject.toml`, `requirements.txt`, `Cargo.toml` and `go.mod` there too, `uv.lock` and
+  `poetry.lock` beside a Python manifest, and reads
   `~/.npmrc`. It writes nothing to your project. Requests are remembered in Herdr's `shared.json`.
 - **Programs:** it runs `printenv` to read your token, `xdg-open` or `open` when you click a row, and
   `npm login` when you click Sign in.
@@ -105,6 +108,7 @@ under the SIL Open Font License 1.1.
 npm test
 ```
 
-`audit.js` holds the logic and imports nothing from Herdr, so the tests run under plain Node. So does
-`toml.js`, the TOML reader, whose tests use a vendored copy of the
+`audit.js` holds the logic and imports nothing from Herdr, so the tests run under plain Node. So do
+`tree.js` (the plain dependency tree), `python.js` (Python's manifests and lockfiles) and `toml.js`,
+the TOML reader, whose tests use a vendored copy of the
 [toml-test](https://github.com/toml-lang/toml-test) suite in `test/fixtures/toml-test/`.

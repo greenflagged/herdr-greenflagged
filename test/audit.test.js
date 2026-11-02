@@ -37,7 +37,7 @@ test("findManifest prefers an audited manifest within one folder", async () => {
 });
 
 test("WATCHED_FILES lists every manifest once", () => {
-  assert.deepEqual(WATCHED_FILES, ["package.json", "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod"]);
+  assert.deepEqual(WATCHED_FILES, ["package.json", "pyproject.toml", "uv.lock", "poetry.lock", "requirements.txt", "Cargo.toml", "go.mod"]);
 });
 
 test("findManifest names each unaudited language", async () => {
@@ -73,12 +73,58 @@ test("findManifest surfaces a package.json that is not valid JSON", async () => 
   assert.equal(project.error, "package.json is not valid JSON");
 });
 
+test("findManifest surfaces a pyproject.toml that is not valid TOML as the error state", async () => {
+  const project = await findManifest("/r", "/Users/a", files({ "/r/pyproject.toml": "[project\nname = 1", "/r/requirements.txt": "httpx" }));
+  assert.equal(project.path, "/r/pyproject.toml");
+  assert.match(project.error, /^pyproject\.toml line 1: /);
+});
+
 test("findManifest keeps list order among unaudited manifests in one folder", async () => {
-  const all = { "/r/pyproject.toml": "", "/r/requirements.txt": "", "/r/Cargo.toml": "", "/r/go.mod": "" };
+  const all = { "/r/pyproject.toml": "[project]\ndependencies = []", "/r/requirements.txt": "", "/r/Cargo.toml": "", "/r/go.mod": "" };
   assert.equal((await findManifest("/r", "/Users/a", files(all))).path, "/r/pyproject.toml");
   const { "/r/pyproject.toml": _p, ...noPyproject } = all;
   assert.equal((await findManifest("/r", "/Users/a", files(noPyproject))).path, "/r/requirements.txt");
   assert.equal((await findManifest("/r", "/Users/a", files({ "/r/Cargo.toml": "", "/r/go.mod": "" }))).path, "/r/Cargo.toml");
+});
+
+test("findManifest reads requirements.txt when pyproject.toml declares no dependency tables", async () => {
+  const read = files({
+    "/r/pyproject.toml": '[project]\nname = "app"\ndynamic = ["dependencies"]',
+    "/r/requirements.txt": "requests>=2\n",
+  });
+  const project = await findManifest("/r", "/Users/a", read);
+  assert.equal(project.path, "/r/requirements.txt");
+  assert.equal(project.ecosystem.file, "requirements.txt");
+  assert.equal(project.name, "app");
+  assert.equal(project.undeclared, undefined);
+  assert.deepEqual(project.deps, [{ name: "requests", constraint: ">=2", dev: false }]);
+});
+
+test("findManifest keeps an undeclared pyproject.toml when nothing else is beside it", async () => {
+  const read = files({ "/r/pyproject.toml": "[build-system]\nrequires = []", "/r/Cargo.toml": "" });
+  const project = await findManifest("/r", "/Users/a", read);
+  assert.equal(project.path, "/r/pyproject.toml");
+  assert.deepEqual(project.deps, []);
+  assert.equal(project.undeclared, true);
+});
+
+test("findManifest ignores requirements.txt beside a pyproject.toml that declares its dependencies", async () => {
+  const read = files({ "/r/pyproject.toml": "[project]\ndependencies = []", "/r/requirements.txt": "requests\n" });
+  const project = await findManifest("/r", "/Users/a", read);
+  assert.equal(project.path, "/r/pyproject.toml");
+  assert.deepEqual(project.deps, []);
+  assert.equal(project.undeclared, undefined);
+});
+
+test("both Python entries parse, share their lockfiles and carry a note", () => {
+  const python = ECOSYSTEMS.filter((e) => e.id === "pypi");
+  assert.deepEqual(python.map((e) => e.file), ["pyproject.toml", "requirements.txt"]);
+  for (const e of python) {
+    assert.equal(typeof e.parse, "function", e.file);
+    assert.deepEqual(e.lockfiles.map((l) => l.file), ["uv.lock", "poetry.lock"], e.file);
+    assert.match(e.note, /uv\.lock or poetry\.lock/, e.file);
+  }
+  assert.equal(python[0].lockfiles, python[1].lockfiles);
 });
 
 test("findManifest reads only package.json in a folder that has one", async () => {

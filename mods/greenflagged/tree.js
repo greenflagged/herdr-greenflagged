@@ -2,11 +2,17 @@
 // check. Plain data in and out, with no Herdr imports and no knowledge of any
 // language, so `npm test` can run it under Node without the app.
 //
-// direct:     [{ name, constraint, dev, version?, extras? }]   an ecosystem's `parse` output
-// edge:       { name, version?, constraint?, extras? }         what a resolver hands back as children
+// direct:     [{ name, constraint, dev, version?, extras?, marker? }]   an ecosystem's `parse` output
+// edge:       { name, version?, constraint?, extras?, marker? }         what a resolver hands back as children
 // resolve:    (edge) -> Resolution | null, or a Promise of one
 // Resolution: { version: string | null, children: edge[] }
-// resolver:   resolve, or { resolve, count?: boolean }; `count: false` skips the count walk
+// resolver:   resolve, or { resolve, count?: boolean, direct?: direct[] }; `count: false` skips the
+//             count walk, and `direct` replaces the manifest's directs when the lockfile knows them
+//             better (one row per locked version of a split dependency, say)
+//
+// `marker` is row metadata, never identity: rows merge on name@version, and a merged
+// row shows the first non-null marker among its edges. Child edges that differ only in
+// marker are one edge, and it keeps the first non-null marker too.
 //
 // A node is built only when its parent is expanded, so a package several others
 // depend on costs nothing until someone opens it under each of them.
@@ -63,12 +69,17 @@ function group(resolved) {
     const key = nodeKey(edge.name, version);
     let entry = byKey.get(key);
     if (!entry) {
-      entry = { name: edge.name, version, constraint: edge.constraint ?? null, key, extras: new Set(), edges: new Map(), dev: true };
+      entry = { name: edge.name, version, constraint: edge.constraint ?? null, marker: edge.marker ?? null, key, extras: new Set(), edges: new Map(), dev: true };
       byKey.set(key, entry);
     }
     entry.constraint ??= edge.constraint ?? null;
+    entry.marker ??= edge.marker ?? null;
     for (const extra of edge.extras ?? []) entry.extras.add(extra);
-    for (const child of resolution?.children ?? []) entry.edges.set(edgeId(child), child);
+    for (const child of resolution?.children ?? []) {
+      const id = edgeId(child), seen = entry.edges.get(id);
+      if (!seen) entry.edges.set(id, child);
+      else if (seen.marker == null && child.marker != null) entry.edges.set(id, { ...seen, marker: child.marker });
+    }
     entry.dev = entry.dev && Boolean(edge.dev);
   }
   return [...byKey.values()].map((entry) => ({ ...entry, extras: [...entry.extras].sort(), childEdges: [...entry.edges.values()] }));
@@ -77,7 +88,7 @@ function group(resolved) {
 function makeNode(entry, { dev, cycle = false }) {
   const childEdges = cycle ? [] : entry.childEdges;
   return {
-    name: entry.name, version: entry.version, constraint: entry.constraint, dev, key: entry.key, extras: entry.extras,
+    name: entry.name, version: entry.version, constraint: entry.constraint, marker: entry.marker, dev, key: entry.key, extras: entry.extras,
     cycle, leaf: cycle || childEdges.length === 0, loading: false, children: cycle ? [] : null, childEdges, pending: null,
   };
 }
@@ -96,7 +107,7 @@ async function resolveAll(resolve, edges) {
 // `runtime` is exact and a runtime package never gets the `dev` tag.
 // Walk 2 starts from the dev directs. It is the only walk the cap can stop.
 // Both walks also stop at the hard ceilings (`maxVisits`, `maxPops`). How often a real
-// lockfile reaches them is unmeasured: no ecosystem has a resolver yet. Then `capped`
+// lockfile reaches them is unmeasured: the Python resolvers are the first. Then `capped`
 // is set and `runtime` may be short, so a runtime package past the ceiling can show
 // as `dev`.
 export async function buildTree(direct, resolver, { cap = MAX_TREE_NODES, maxVisits = MAX_WALK_VISITS, maxPops = MAX_WALK_POPS, pause } = {}) {
@@ -249,12 +260,12 @@ export const failedNote = (file, error) => `Couldn't read ${file ?? "the lockfil
 // A refresh that starts during expandPaths isn't caught: expandPaths still deletes
 // the saved paths that fail or no longer match from `expanded`.
 export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_NOTE, expanded = new Set(), pause, stale = () => false } = {}) {
-  let resolver = () => null, note = lock ? null : noLockNote;
+  let resolver = () => null, made = null, note = lock ? null : noLockNote;
   if (lock && lock.text.length > MAX_LOCK_CHARS) {
     note = `${lock.file} is too large to parse, so only direct dependencies are shown.`;
   } else if (lock) {
     try {
-      const made = lock.resolver(lock.text, project);
+      made = lock.resolver(lock.text, project);
       if (made?.error) note = failedNote(lock.file, made.error);
       else if (made) resolver = made;
       else note = failedNote(lock.file, "its resolver returned nothing");
@@ -262,7 +273,8 @@ export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_N
   }
   let tree;
   try {
-    tree = await buildTree(project.deps, resolver, { pause });
+    // `made` may be a bare resolve function, whose `.direct` is undefined.
+    tree = await buildTree(made?.direct ?? project.deps, resolver, { pause });
   } catch (error) {
     note = failedNote(lock?.file, error);
     tree = await buildTree(project.deps, () => null);
@@ -272,4 +284,56 @@ export async function treeForProject(project, lock, { noLockNote = NO_LOCKFILE_N
   tree.lockFile = lock?.file ?? null;
   try { await expandPaths(tree, expanded); } catch (error) { tree.note ??= failedNote(tree.lockFile, error); }
   return tree;
+}
+
+// A resolver over a lockfile's package list, for any language whose lock names each
+// package once per version. `packages` is [{ name, version, dependencies: edge[],
+// optionalDependencies?: Map<extra, edge[]> }], names already normalized. An edge with
+// a version finds name@version; one without takes the first package of that name in
+// list order. A child edge with no version gets one filled in when only one version of
+// that name is locked, so the count walk and the row agree; otherwise it is resolved
+// on expand. A package the list lacks resolves to null, which shows the edge as a leaf.
+export function graphResolver(packages) {
+  const byKey = new Map(), names = new Map();
+  for (const pkg of packages) {
+    const key = `${pkg.name}@${pkg.version}`;
+    if (byKey.has(key)) continue;
+    byKey.set(key, pkg);
+    if (!names.has(pkg.name)) names.set(pkg.name, []);
+    names.get(pkg.name).push(key);
+  }
+  const fill = (edge) => {
+    if (edge.version) return edge;
+    const keys = names.get(edge.name);
+    return keys?.length === 1 ? { ...edge, version: byKey.get(keys[0]).version } : edge;
+  };
+  const resolve = (edge) => {
+    const pkg = byKey.get(edge.version ? `${edge.name}@${edge.version}` : names.get(edge.name)?.[0]);
+    if (!pkg) return null;
+    const children = [...(pkg.dependencies ?? [])];
+    for (const extra of edge.extras ?? []) children.push(...(pkg.optionalDependencies?.get(extra) ?? []));
+    return { version: pkg.version, children: children.map(fill) };
+  };
+  return { resolve };
+}
+
+// The direct list for a lock that records the project's own dependencies (`lockRows`,
+// each { name, version, marker?, extras?, dev }), joined with the manifest's deps by
+// name. A row keeps its own `dev` (the lock section it came from) and takes the
+// manifest's constraint, and its extras when the row has none. Manifest deps the lock
+// doesn't list are appended as they are, so a stale lock still shows every direct.
+export function mergeDirect(manifestDeps, lockRows) {
+  const manifest = new Map();
+  for (const dep of manifestDeps) if (!manifest.has(dep.name)) manifest.set(dep.name, dep);
+  const listed = new Set(), direct = [];
+  for (const row of lockRows) {
+    const dep = manifest.get(row.name);
+    listed.add(row.name);
+    direct.push({
+      name: row.name, version: row.version ?? null, constraint: dep?.constraint ?? null, marker: row.marker ?? null,
+      extras: row.extras?.length ? row.extras : dep?.extras ?? [], dev: Boolean(row.dev),
+    });
+  }
+  for (const dep of manifestDeps) if (!listed.has(dep.name)) direct.push(dep);
+  return direct;
 }
