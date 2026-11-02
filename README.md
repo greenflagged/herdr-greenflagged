@@ -4,14 +4,22 @@ A [Herdr](https://herdr.dev) panel that follows the terminal you're working in, 
 `package.json`, and shows each direct dependency's [Greenflagged](https://greenflagged.dev) status.
 The problems come first, and the greenflagged packages fold away behind a count.
 
-npm only for now. In a Python or Rust project the panel shows a plain tree of its dependencies, read
-from `uv.lock`, `poetry.lock` or `Cargo.lock`, with no verdicts, and sends nothing. A Cargo workspace
-shows as the workspace with its crates under it, and a crate's folder inside one shows that crate with
-its sibling crates as expandable `(project)` rows, read from the workspace's `Cargo.lock`. A Go project
-gets the same plain tree, read from `go.mod` alone: its direct modules, then its indirect ones in a
-group. A Java or Kotlin project gets its direct dependencies from `pom.xml` or the Gradle build file,
-without running Maven or Gradle, plus the versions in `gradle.lockfile` when there is one. Python
-verdicts follow once Greenflagged's PyPI audit is live.
+What it does depends on the project's language:
+
+| Language | What the panel shows | Read from |
+|---|---|---|
+| JavaScript (npm) | Each direct dependency's Greenflagged verdict | `package.json` |
+| Python | A plain dependency tree, not checked | `pyproject.toml` or `requirements.txt`, with `uv.lock` or `poetry.lock` |
+| Rust | A plain dependency tree, not checked | `Cargo.toml` and `Cargo.lock` |
+| Go | Its direct modules, then its indirect ones in a group, not checked | `go.mod` alone |
+| Java and Kotlin | Its direct dependencies, not checked | `pom.xml` or the Gradle build file, with `gradle.lockfile` when there is one |
+
+Only npm gets verdicts. For the other languages the panel sends nothing: there are no dots, the
+header says "no Greenflagged checks yet", and you get the tree to browse. A Cargo workspace shows as
+the workspace with its crates under it, and a crate's folder inside one shows that crate with its
+sibling crates as expandable `(project)` rows, read from the workspace's `Cargo.lock`. Maven and
+Gradle are read without running either. Python verdicts follow once Greenflagged's PyPI audit is
+live.
 
 ## What it looks like
 
@@ -26,6 +34,11 @@ Swapping `request` for `@cypress/request` clears the block, and the panel update
 Moving the other three to the suggested versions greenflags every dependency:
 
 ![Diff updating chalk, colors and debug to the suggested versions; the panel shows all 11 dependencies greenflagged](docs/3-all-green.webp)
+
+In a language Greenflagged doesn't check yet, the panel shows the dependency tree instead. Here, in
+one crate of a Rust workspace, two sibling crates are open:
+
+![Panel for crab-daemon reading "Rust: no Greenflagged checks yet" and "26 direct, 416 total", with its dependencies as plain rows and the crab-notifier and crab-risk sibling crates expanded to their own dependencies, some tagged dev](docs/4-tree.webp)
 
 ## Install
 
@@ -78,7 +91,8 @@ Herdr first, then on that one, so you only need to sign in on one of them.
 
 - **Network:** it sends the name and version range of each direct dependency to
   `https://greenflagged.dev/mcp`, with your token. That includes the names of private packages.
-  It sends nothing else from your project.
+  It sends nothing else from your project. For Python, Rust, Go, Java and Kotlin it sends nothing
+  at all: the tree is built from the files below, on your machine.
 - **Requests:** hovering a `not imported` package shows a Request button. Clicking it asks Greenflagged
   to import and review that package, under your token. Nothing is requested unless you click.
 - **Files:** it reads `package.json` from your terminal's folder and the folders above it, looks for
